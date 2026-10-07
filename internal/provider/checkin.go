@@ -31,6 +31,7 @@ type checkiner struct {
 	mu       *sync.Mutex
 	by       string // the vendor, WorkBuddyCheckin.By; "" for WorkBuddy
 	label    string // the vendor in the log
+	recheck  bool   // its campaigns can change before the Beijing day ends
 	accounts func() []checkinAcct
 }
 
@@ -63,7 +64,7 @@ func (c checkiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyCheckin
 		}
 		asked[a.key] = true
 		prev, seen := st[a.key]
-		if seen && prev.settled(day, now, soon) {
+		if seen && prev.settled(day, now, soon) && (!c.recheck || !soon && now.Sub(prev.At) < wbCheckinEvery) {
 			prev.User, prev.By = a.User, c.by
 			out = append(out, prev)
 			continue

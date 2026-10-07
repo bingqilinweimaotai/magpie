@@ -40,6 +40,8 @@ The hook returns `{outcome, credit?, streak?, message?}`. `outcome` is one of `c
 
 The switch is off by default. For a provider whose vendor magpie checked in through the plugin's fetch before (WorkBuddy, Trae CN, MiniMax Code, Qoder), it follows that vendor's existing switch until set on its own, and magpie's own check-in leaves that provider's accounts to the plugin (`pluginChecksIn`), so an account is never checked in twice.
 
+Qoder plugins without `auth.checkin` still use [`qoder_checkin.go`](../../internal/provider/qoder_checkin.go) through the plugin's fetch. Qoder's campaigns can roll over after Beijing midnight, so this path rechecks even settled results every 30 minutes, or immediately on a manual check-in. Only a campaign whose `startAt` is today in Beijing and whose `startAt`/`endAt` contain the current time counts as today's credits. Yesterday's campaign leaves today's result failed and retryable until the new one opens. Existing saved results are rechecked too; no stored format changes. Other vendors and plugins with their own check-in retain their daily settlement.
+
 ## How ownership changes
 
 Migration records use four states:
