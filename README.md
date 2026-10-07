@@ -211,7 +211,7 @@ See [Gateway middleware](https://usemagpie.ai/docs/plugins#middleware).
 - **Share it on your network.** Turn on *Share on local network*, then create a named **gateway key** for each client, each with its own daily, weekly or monthly token and cost limit.
 - **Remote magpie.** A laptop can use the providers, accounts and routing groups of the magpie on your desktop, while still wiring its own agents.
 - **Docker.** Run `ghcr.io/yetone/magpie` on a server or a NAS, and manage it from the web UI.
-- **Sync.** Back up to a file, or keep machines in sync over WebDAV (Nutstore, Nextcloud…) or S3.
+- **Sync.** Back up to a file, or keep machines in sync over WebDAV (Nutstore, Nextcloud…), S3, or an encrypted GitHub repository backup.
 
 ## Library: instructions, MCP servers and skills
 

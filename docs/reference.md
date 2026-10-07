@@ -1424,14 +1424,19 @@ stdin.
 
 ### Keeping machines in sync
 
-*Settings → Sync and backup → WebDAV or S3 sync* keeps the same backup on a
-server and brings every machine up to date with it, every 3 minutes while the
-gateway runs. Choose one of these:
+*Settings → Sync and backup → WebDAV, S3 or GitHub sync* keeps the same backup
+on a server and brings every machine up to date with it, every 3 minutes while
+the gateway runs. Choose one of these:
 
 - **WebDAV**: a folder on a WebDAV server such as 坚果云, Nextcloud or a
   Synology.
 - **S3**: a bucket on AWS S3, Cloudflare R2, Backblaze B2, MinIO, Garage, a
   NAS or any other S3-compatible server.
+- **GitHub**: an existing repository, using a fine-grained token
+  with Contents read and write permission. A private repository is recommended.
+  The address can include a folder, such as `github://owner/repo/magpie-sync`.
+  Each update is a commit to that branch, so the repository also provides a
+  history of the encrypted backup.
 
 The file is sealed on your machine with the passphrase, so the server only
 ever stores ciphertext. Each machine writes only over the version it read (a
@@ -1443,6 +1448,8 @@ magpie webdav on https://dav.jianguoyun.com/dav/ user=me@example.com
 magpie s3 on s3://my-bucket/magpie endpoint=https://<account>.r2.cloudflarestorage.com access-key-id=…
 magpie s3 on s3://backups endpoint=http://nas.local:9000 path-style=yes access-key-id=…
 magpie s3                       # where it syncs to and how the last sync went; magpie s3 now, off
+magpie github on github://owner/private-backups/settings branch=main
+magpie github                   # where it syncs to and how the last sync went; magpie github now, off
 ```
 
 For S3:
@@ -1458,6 +1465,24 @@ For S3:
   needs to list the bucket.
 - A server without conditional writes is supported. There magpie checks the
   object's ETag just before each write.
+
+For GitHub:
+
+- Create the repository before enabling sync. Leaving Branch empty uses its
+  default branch. For an empty repository, the first encrypted backup creates
+  the initial commit on that default branch. A selected branch other than the
+  default must already exist.
+- Give a fine-grained token access to this repository with Contents read and
+  write permission. It is asked for by the CLI, never accepted in a command
+  line, and is saved separately from the library's GitHub token.
+- Folder is optional. Files go in `<folder>/magpie/`; every changed backup
+  creates a commit. Unchanged setup creates no backup commit.
+- Use the same encryption passphrase on every computer. It must differ from
+  the GitHub token. The token and sync connection settings stay on each computer.
+- The file limit is 64 MiB. Repository history retains encrypted old versions,
+  including usage files if sharing is enabled.
+- Switching between WebDAV, S3 and GitHub keeps the other services' settings
+  and credentials for switching back; one service syncs at a time.
 
 ## OTLP export
 
