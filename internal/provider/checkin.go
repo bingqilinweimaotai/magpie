@@ -2,9 +2,9 @@ package provider
 
 // A daily check-in, whichever vendor's: WorkBuddy's (workbuddy_checkin.go)
 // and Trae CN's (trae_checkin.go). Each account in use is checked in once
-// a Beijing day; what came of it is kept in the vendor's file by its key,
-// so a restart doesn't ask again (see workbuddy_checkin.go for when a
-// failure is tried again).
+// a Beijing day, or through Qoder's campaign window. What came of it is
+// kept in the vendor's file by its key, so a restart doesn't ask again
+// (see workbuddy_checkin.go for when a failure is tried again).
 
 import (
 	"context"
@@ -64,7 +64,15 @@ func (c checkiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyCheckin
 		}
 		asked[a.key] = true
 		prev, seen := st[a.key]
-		if seen && prev.settled(day, now, soon) && (!c.recheck || !soon && now.Sub(prev.At) < wbCheckinEvery) {
+		settled := prev.settled(day, now, soon)
+		if c.recheck {
+			if prev.Checked() && !prev.ValidUntil.IsZero() {
+				settled = !soon && now.Before(prev.ValidUntil)
+			} else {
+				settled = settled && !soon && now.Sub(prev.At) < wbCheckinEvery
+			}
+		}
+		if seen && settled {
 			prev.User, prev.By = a.User, c.by
 			out = append(out, prev)
 			continue

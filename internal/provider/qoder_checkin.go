@@ -6,7 +6,8 @@ package provider
 // (actionType CLAIM_BENEFIT), and claim one with a POST. While the setting
 // is on, whichever magpie runs the gateway claims each claimable one for
 // each account of @magpie-community/opencode-qoder-auth. Campaigns are
-// checked every 30 minutes: their daily rollover need not be midnight.
+// checked every 30 minutes until claimed, then after the campaign ends:
+// their daily rollover need not be midnight.
 // Both go through the plugin's fetch (0.2.7 and later), which sends them
 // as the account, on its device token. The built-in's accounts, not moved
 // onto the plugin, aren't checked in.
@@ -40,7 +41,7 @@ var qoderCampaignURLs = map[string]string{
 }
 
 // qoderCampaign is one of an account's campaigns. startAt and endAt bound
-// the day it is for.
+// its claim window, which can cross Beijing midnight.
 type qoderCampaign struct {
 	ID          string  `json:"campaignId"`
 	ActionType  string  `json:"actionType"`
@@ -109,10 +110,17 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 		}
 	}
 	var credit float64
+	var until time.Time
 	claimed, failed := 0, 0
 	var why string
 	for _, c := range daily {
-		if c.ClaimStatus != "CLAIMABLE" || c.ID == "" || !c.today(now) {
+		if !c.active(now) {
+			continue
+		}
+		if end := qoderWhen(c.EndAt); until.IsZero() || end.Before(until) {
+			until = end
+		}
+		if c.ClaimStatus != "CLAIMABLE" || c.ID == "" {
 			continue
 		}
 		var got qoderClaim
@@ -139,30 +147,29 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 	case failed > 0:
 		return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: why}
 	case claimed > 0:
-		return WorkBuddyCheckin{Outcome: CheckinClaimed, Credit: credit}
+		return WorkBuddyCheckin{Outcome: CheckinClaimed, Credit: credit, ValidUntil: until}
 	case len(daily) == 0:
 		return WorkBuddyCheckin{Outcome: CheckinInactive}
 	}
 	for _, c := range daily {
-		if c.ClaimStatus == "CLAIMED" && c.today(now) {
-			return WorkBuddyCheckin{Outcome: CheckinDone, Credit: c.Benefit.Amount}
+		if c.ClaimStatus == "CLAIMED" && c.active(now) {
+			return WorkBuddyCheckin{Outcome: CheckinDone, Credit: c.Benefit.Amount, ValidUntil: until}
 		}
 	}
 	return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: "today's credits aren't offered yet"}
 }
 
-// today excludes yesterday's credits, which Qoder can still list after midnight.
-func (c qoderCampaign) today(now time.Time) bool {
-	start := time.Unix(qoderWhen(c.StartAt), 0)
-	return CheckinDay(start) == CheckinDay(now) && !now.Before(start) && now.Unix() < qoderWhen(c.EndAt)
+// active includes the start and excludes the end, regardless of the Beijing day.
+func (c qoderCampaign) active(now time.Time) bool {
+	return !now.Before(qoderWhen(c.StartAt)) && now.Before(qoderWhen(c.EndAt))
 }
 
-// qoderWhen is a time Qoder gives, in seconds or milliseconds, as seconds.
-func qoderWhen(v float64) int64 {
+// qoderWhen is a time Qoder gives, in seconds or milliseconds.
+func qoderWhen(v float64) time.Time {
 	if v > 1e12 {
-		return int64(v / 1000)
+		return time.UnixMilli(int64(v))
 	}
-	return int64(v)
+	return time.Unix(int64(v), 0)
 }
 
 // qoderCall asks u as a and reads its answer.
