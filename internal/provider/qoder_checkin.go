@@ -6,8 +6,8 @@ package provider
 // (actionType CLAIM_BENEFIT), and claim one with a POST. While the setting
 // is on, whichever magpie runs the gateway claims each claimable one for
 // each account of @magpie-community/opencode-qoder-auth. Campaigns are
-// checked every 30 minutes until claimed, then after the campaign ends:
-// their daily rollover need not be midnight.
+// checked every 30 minutes and on a Beijing day change: their daily
+// rollover need not be midnight. The server decides which can be claimed.
 // Both go through the plugin's fetch (0.2.7 and later), which sends them
 // as the account, on its device token. The built-in's accounts, not moved
 // onto the plugin, aren't checked in.
@@ -114,11 +114,10 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 	claimed, failed := 0, 0
 	var why string
 	for _, c := range daily {
-		if !c.active(now) {
-			continue
-		}
-		if end := qoderWhen(c.EndAt); until.IsZero() || end.Before(until) {
-			until = end
+		if c.active(now) {
+			if end := qoderWhen(c.EndAt); until.IsZero() || end.Before(until) {
+				until = end
+			}
 		}
 		if c.ClaimStatus != "CLAIMABLE" || c.ID == "" {
 			continue

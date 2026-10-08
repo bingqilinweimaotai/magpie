@@ -84,7 +84,7 @@ func qoderCheckinFixture(t *testing.T, now *time.Time, accts ...qoderCheckinAcct
 }
 
 // Qoder's daily credits (ARNO on Discord): the campaigns are read, the
-// day's claimed while claimable, once a Beijing day; one claimed already
+// day's claimed while the server says claimable; one claimed already
 // is a check-in done, none listed is no event, and a refusal or an expired
 // sign-in is a failure with its reason. Other campaigns are never claimed.
 func TestQoderCheckin(t *testing.T) {
@@ -103,9 +103,9 @@ func TestQoderCheckin(t *testing.T) {
 	if got := strings.Join(f.take(), ", "); got != "GET , POST /daily-1/claim" {
 		t.Fatalf("asked %s", got)
 	}
-	// the day's answer holds: nothing asked again
+	// a recent answer is reused: nothing asked again immediately
 	if rs := c.checkinNow(t.Context(), false); rs[0].Outcome != CheckinClaimed || rs[0].Asked || len(f.take()) != 0 {
-		t.Fatalf("asked again the same day: %+v", rs)
+		t.Fatalf("asked again immediately: %+v", rs)
 	}
 
 	// the next day, claimed already (in Qoder): no claim
@@ -274,7 +274,7 @@ func TestQoderCheckinCampaignRollover(t *testing.T) {
 					t.Fatalf("new campaign wasn't claimed: %+v, claims %d", rs, posts)
 				}
 				beforeReads, beforeClaims := gets, posts
-				now = now.Add(wbCheckinEvery)
+				now = now.Add(wbCheckinEvery - time.Nanosecond)
 				rs = c.checkinNow(t.Context(), false)
 				if len(rs) != 1 || rs[0].Outcome != CheckinClaimed || rs[0].Asked || gets != beforeReads || posts != beforeClaims {
 					t.Fatalf("asked again before campaign expiry: %+v, reads %d, claims %d", rs, gets-beforeReads, posts-beforeClaims)
@@ -288,8 +288,8 @@ func TestQoderCheckinCampaignRollover(t *testing.T) {
 	}
 }
 
-// A successful campaign is read from disk until its end, including across
-// midnight. The minute loop must not turn its local checks into requests.
+// A successful campaign is reused for at most 30 minutes, and never past
+// Beijing midnight or its end. Refreshing does not claim it again.
 func TestQoderCheckinCampaignCache(t *testing.T) {
 	for _, site := range []string{"qoder", QoderCNID} {
 		for _, status := range []string{"CLAIMABLE", "CLAIMED"} {
@@ -328,22 +328,49 @@ func TestQoderCheckinCampaignCache(t *testing.T) {
 				if len(rs) != 1 || rs[0].Outcome != want || !rs[0].ValidUntil.Equal(end) || posts != claims {
 					t.Fatalf("first check-in: %+v, claims %d", rs, posts)
 				}
-				for now = start.Add(time.Minute); now.Before(end); now = now.Add(time.Minute) {
-					l.tick(t.Context(), c)
-				}
-				now = end.Add(-time.Nanosecond)
+				now = start.Add(wbCheckinEvery - time.Nanosecond)
 				rs = c.checkinNow(t.Context(), false)
 				if len(rs) != 1 || rs[0].Outcome != want || rs[0].Asked || gets != 1 || posts != claims {
+					t.Fatalf("asked before the refresh interval: %+v, reads %d, claims %d", rs, gets, posts)
+				}
+				now = start.Add(wbCheckinEvery)
+				rs = l.tick(t.Context(), c)
+				if len(rs) != 1 || rs[0].Outcome != CheckinDone || !rs[0].Asked || gets != 2 || posts != claims {
+					t.Fatalf("campaign wasn't refreshed: %+v, reads %d, claims %d", rs, gets, posts)
+				}
+				// A recent cached result must still be refreshed on a day change.
+				now = time.Date(2026, 10, 7, 23, 55, 0, 0, beijing)
+				l.tick(t.Context(), c)
+				now = time.Date(2026, 10, 8, 0, 0, 0, 0, beijing)
+				rs = l.tick(t.Context(), c)
+				if len(rs) != 1 || rs[0].Outcome != CheckinDone || rs[0].Day != wbCheckinDay(now) || !rs[0].Asked || gets != 4 || posts != claims {
+					t.Fatalf("midnight kept yesterday's result: %+v, reads %d, claims %d", rs, gets, posts)
+				}
+				if saved := readCheckins(c.path)[qoderCheckinKey(a)]; saved.Day != wbCheckinDay(now) {
+					t.Fatalf("midnight didn't update the saved day: %+v", saved)
+				}
+				// A restart reads the same recent result from disk.
+				restarted := newQoderCheckiner(func() []qoderCheckinAcct { return []qoderCheckinAcct{a} }, func() time.Time { return now })
+				restarted.path = c.path
+				rs = restarted.checkinNow(t.Context(), false)
+				if len(rs) != 1 || rs[0].Day != wbCheckinDay(now) || rs[0].Asked || gets != 4 {
+					t.Fatalf("restart didn't reuse the saved result: %+v, reads %d", rs, gets)
+				}
+				now = end.Add(-time.Minute)
+				c.checkinNow(t.Context(), false)
+				now = end.Add(-time.Nanosecond)
+				rs = c.checkinNow(t.Context(), false)
+				if len(rs) != 1 || rs[0].Outcome != CheckinDone || rs[0].Asked || gets != 5 || posts != claims {
 					t.Fatalf("asked during the campaign: %+v, reads %d, claims %d", rs, gets, posts)
 				}
 				// Even a recent manual verification cannot extend the window.
 				rs = c.checkinNow(t.Context(), true)
-				if len(rs) != 1 || rs[0].Outcome != CheckinDone || !rs[0].Asked || gets != 2 || posts != claims {
+				if len(rs) != 1 || rs[0].Outcome != CheckinDone || !rs[0].Asked || gets != 6 || posts != claims {
 					t.Fatalf("manual verification: %+v, reads %d, claims %d", rs, gets, posts)
 				}
 				now = end
 				rs = c.checkinNow(t.Context(), false)
-				if len(rs) != 1 || rs[0].Outcome != CheckinFailed || !rs[0].Asked || gets != 3 || posts != claims {
+				if len(rs) != 1 || rs[0].Outcome != CheckinFailed || !rs[0].Asked || gets != 7 || posts != claims {
 					t.Fatalf("expired result was reused: %+v, reads %d, claims %d", rs, gets, posts)
 				}
 				campaign.StartAt += 86400
@@ -351,13 +378,76 @@ func TestQoderCheckinCampaignCache(t *testing.T) {
 				campaign.ClaimStatus = "CLAIMABLE"
 				now = end.Add(wbCheckinRetry - time.Nanosecond)
 				rs = c.checkinNow(t.Context(), false)
-				if len(rs) != 1 || rs[0].Asked || gets != 3 {
+				if len(rs) != 1 || rs[0].Asked || gets != 7 {
 					t.Fatalf("retried too soon: %+v, reads %d", rs, gets)
 				}
 				now = now.Add(time.Nanosecond)
 				rs = c.checkinNow(t.Context(), false)
-				if len(rs) != 1 || rs[0].Outcome != CheckinClaimed || !rs[0].Asked || gets != 4 || posts != claims+1 {
+				if len(rs) != 1 || rs[0].Outcome != CheckinClaimed || !rs[0].Asked || gets != 8 || posts != claims+1 {
 					t.Fatalf("next campaign wasn't claimed: %+v, reads %d, claims %d", rs, gets, posts)
+				}
+			})
+		}
+	}
+}
+
+// A claimed campaign, even a long one, must not hide a new or reset
+// campaign. An empty list is also asked again after the same interval.
+func TestQoderCheckinCampaignChanges(t *testing.T) {
+	for _, site := range []string{"qoder", QoderCNID} {
+		for _, change := range []string{"long-campaign", "reset", "inactive"} {
+			t.Run(site+"/"+change, func(t *testing.T) {
+				var campaign qoderCampaign
+				if err := json.Unmarshal([]byte(qoderDailyCampaignJSON), &campaign); err != nil {
+					t.Fatal(err)
+				}
+				if change == "long-campaign" {
+					campaign.EndAt += 29 * 86400
+				}
+				now := time.Unix(int64(campaign.StartAt), 0)
+				campaigns := []qoderCampaign{campaign}
+				want := CheckinDone
+				if change == "inactive" {
+					campaigns, want = nil, CheckinInactive
+				}
+				gets, posts := 0, 0
+				a := qoderCheckinAcct{User: "arno", On: true, site: site, uid: "u1", via: func(req *http.Request) (*http.Response, error) {
+					body := `{"data":{"status":"CLAIMED","benefit":{"amount":100}}}`
+					if req.Method == http.MethodGet {
+						gets++
+						b, err := json.Marshal(map[string]any{"campaigns": campaigns})
+						if err != nil {
+							t.Fatal(err)
+						}
+						body = string(b)
+					} else {
+						posts++
+					}
+					return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+				}}
+				c := qoderCheckinFixture(t, &now, a)
+				rs := c.checkinNow(t.Context(), false)
+				if len(rs) != 1 || rs[0].Outcome != want || gets != 1 || posts != 0 {
+					t.Fatalf("initial campaign: %+v, reads %d, claims %d", rs, gets, posts)
+				}
+				campaign.ClaimStatus = "CLAIMABLE"
+				if change == "long-campaign" {
+					campaign.ID = "next-daily"
+					campaign.StartAt = float64(now.Add(wbCheckinEvery).Unix())
+					campaign.EndAt = campaign.StartAt + 86400
+					campaigns = append(campaigns, campaign)
+				} else {
+					campaigns = []qoderCampaign{campaign}
+				}
+				now = now.Add(wbCheckinEvery - time.Nanosecond)
+				rs = c.checkinNow(t.Context(), false)
+				if len(rs) != 1 || rs[0].Outcome != want || rs[0].Asked || gets != 1 || posts != 0 {
+					t.Fatalf("asked too soon: %+v, reads %d, claims %d", rs, gets, posts)
+				}
+				now = now.Add(time.Nanosecond)
+				rs = c.checkinNow(t.Context(), false)
+				if len(rs) != 1 || rs[0].Outcome != CheckinClaimed || !rs[0].Asked || gets != 2 || posts != 1 {
+					t.Fatalf("%s wasn't claimed after refresh: %+v, reads %d, claims %d", change, rs, gets, posts)
 				}
 			})
 		}
@@ -375,34 +465,62 @@ func TestQoderCheckinCampaignBounds(t *testing.T) {
 		if scale == 1000 {
 			startAt, endAt = start.UnixMilli(), end.UnixMilli()
 		}
-		for _, tc := range []struct {
-			name string
-			now  time.Time
-			want string
-		}{
-			{"before", start.Add(-time.Nanosecond), CheckinFailed},
-			{"start", start, CheckinClaimed},
-			{"last", end.Add(-time.Nanosecond), CheckinClaimed},
-			{"end", end, CheckinFailed},
-		} {
-			t.Run(fmt.Sprintf("%s/%d", tc.name, scale), func(t *testing.T) {
-				claims := 0
-				a := qoderCheckinAcct{site: "qoder", via: func(req *http.Request) (*http.Response, error) {
-					body := fmt.Sprintf(`{"campaigns":[{"campaignId":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE","startAt":%d,"endAt":%d,"benefit":{"amount":100}}]}`, startAt, endAt)
-					if req.Method == http.MethodPost {
-						claims++
-						body = `{"status":"CLAIMED","benefit":{"amount":100}}`
+		for _, status := range []string{"CLAIMABLE", "CLAIMED"} {
+			for _, tc := range []struct {
+				name string
+				now  time.Time
+				want string
+			}{
+				{"before", start.Add(-time.Nanosecond), CheckinFailed},
+				{"start", start, CheckinClaimed},
+				{"last", end.Add(-time.Nanosecond), CheckinClaimed},
+				{"end", end, CheckinFailed},
+			} {
+				t.Run(fmt.Sprintf("%s/%s/%d", status, tc.name, scale), func(t *testing.T) {
+					want := tc.want
+					if status == "CLAIMABLE" {
+						want = CheckinClaimed
+					} else if want == CheckinClaimed {
+						want = CheckinDone
 					}
-					return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
-				}}
-				r := qoderCheckin(t.Context(), a, tc.now)
-				if r.Outcome != tc.want || (claims == 1) != (tc.want == CheckinClaimed) {
-					t.Fatalf("at %s: %+v, claims %d; want %s", tc.now, r, claims, tc.want)
-				}
-				if r.Checked() && !r.ValidUntil.Equal(end) {
-					t.Fatalf("campaign expiry: %s; want %s", r.ValidUntil, end)
-				}
-			})
+					claims := 0
+					a := qoderCheckinAcct{site: "qoder", via: func(req *http.Request) (*http.Response, error) {
+						body := fmt.Sprintf(`{"campaigns":[{"campaignId":"daily","actionType":"CLAIM_BENEFIT","claimStatus":%q,"startAt":%d,"endAt":%d,"benefit":{"amount":100}}]}`, status, startAt, endAt)
+						if req.Method == http.MethodPost {
+							claims++
+							body = `{"status":"CLAIMED","benefit":{"amount":100}}`
+						}
+						return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+					}}
+					r := qoderCheckin(t.Context(), a, tc.now)
+					if r.Outcome != want || (claims == 1) != (want == CheckinClaimed) {
+						t.Fatalf("at %s: %+v, claims %d; want %s", tc.now, r, claims, want)
+					}
+					if tc.want == CheckinClaimed && !r.ValidUntil.Equal(end) {
+						t.Fatalf("campaign expiry: %s; want %s", r.ValidUntil, end)
+					}
+				})
+			}
 		}
+	}
+}
+
+func TestQoderCheckinClaimableWithoutWindow(t *testing.T) {
+	for _, site := range []string{"qoder", QoderCNID} {
+		t.Run(site, func(t *testing.T) {
+			claims := 0
+			a := qoderCheckinAcct{site: site, via: func(req *http.Request) (*http.Response, error) {
+				body := `{"campaigns":[{"campaignId":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE","benefit":{"amount":100}}]}`
+				if req.Method == http.MethodPost {
+					claims++
+					body = `{"status":"CLAIMED","benefit":{"amount":100}}`
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+			}}
+			r := qoderCheckin(t.Context(), a, time.Now())
+			if r.Outcome != CheckinClaimed || r.Credit != 100 || claims != 1 {
+				t.Fatalf("server-claimable campaign without times: %+v, claims %d", r, claims)
+			}
+		})
 	}
 }
