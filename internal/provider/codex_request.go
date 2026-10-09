@@ -236,7 +236,7 @@ func codexInstructions(model string) string {
 // codexBody makes a Responses request the one Codex CLI would send: it
 // streams only, keeps nothing (so its items carry no ids), carries Codex's
 // instructions — the client's own riding first in the input — and rejects
-// the sampling knobs and any service tier but Fast's.
+// the sampling knobs and any service tier but Fast's and Ultrafast's.
 func codexBody(body []byte) []byte {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
@@ -247,8 +247,9 @@ func codexBody(body []byte) []byte {
 	for _, k := range []string{"max_output_tokens", "max_completion_tokens", "temperature", "top_p", "previous_response_id", "user", "safety_identifier"} {
 		delete(m, k)
 	}
-	// Codex's Fast mode sends "priority"; any other tier stays out
-	if m["service_tier"] != "priority" {
+	// Codex's Fast mode sends "priority", its Ultrafast "ultrafast"; any
+	// other tier stays out
+	if t := m["service_tier"]; t != "priority" && t != "ultrafast" {
 		delete(m, "service_tier")
 	}
 	model, _ := m["model"].(string)
@@ -286,6 +287,7 @@ func codexBody(body []byte) []byte {
 	m["store"] = false
 	m["stream"] = true
 	m["tool_choice"] = "auto"
+	declareSearch(m, false)
 	if _, ok := m["parallel_tool_calls"]; !ok {
 		m["parallel_tool_calls"] = true
 	}
@@ -441,6 +443,127 @@ func orphanOutput(it map[string]any, id string) map[string]any {
 	}
 	return map[string]any{"type": "message", "role": "assistant",
 		"content": "[Previous " + name + " result; call_id=" + id + "]: " + text}
+}
+
+// The ChatGPT backend turns away a request whose input replays a web search
+// (a web_search_call item) without the web_search tool among its tools: HTTP
+// 200, then only an error event, "response protection is unavailable"
+// (#1270). Codex's turns declare the tool when search is on, but not every
+// request carrying the conversation does: a compaction Codex makes on its
+// own for a custom provider (tools: []), magpie's summary request for a
+// compaction_trigger, a thread's description, a turn with function tools
+// alone. Each failed so on a real account, and each went through once the
+// tool was declared. The tool declared is the cached-only one, which
+// fetches nothing live; a request that offered no tools gets tool_choice
+// "none", so it still calls none.
+
+// cachedSearch is the web_search tool declared for a replayed search.
+func cachedSearch() map[string]any {
+	return map[string]any{"type": "web_search", "external_web_access": false}
+}
+
+// DeclareSearch is body with the web_search tool declared when its input
+// replays a web search and nothing declares the tool, or body as it was.
+// lite says the request goes as Codex's Responses Lite, whose tools are
+// an additional_tools input item: the backend refuses a web_search among
+// a Lite request's tools (400 "only supports function tools, custom tools,
+// and client-executed tool search").
+func DeclareSearch(body []byte, lite bool) []byte {
+	if !bytes.Contains(body, []byte(`"web_search_call"`)) {
+		return body
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var m map[string]any
+	if dec.Decode(&m) != nil || m == nil || !declareSearch(m, lite) {
+		return body
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// declareSearch declares the web_search tool in m, a Responses request,
+// when its input replays a web search and neither its tools nor an
+// additional_tools item declares one, and says whether it did. A request
+// is taken as Lite, too, when it carries an additional_tools item or asks
+// for reasoning context "all_turns", which Lite requires; the backend takes
+// the item on a request that isn't Lite as well.
+func declareSearch(m map[string]any, lite bool) bool {
+	input, ok := m["input"].([]any)
+	if !ok {
+		return false
+	}
+	searched, offered := false, false
+	var additional map[string]any // the first additional_tools item
+	for _, raw := range input {
+		it, _ := raw.(map[string]any)
+		switch it["type"] {
+		case "web_search_call":
+			searched = true
+		case "additional_tools":
+			tools, _ := it["tools"].([]any)
+			if declaresSearch(tools) {
+				return false
+			}
+			offered = offered || len(tools) > 0
+			if additional == nil {
+				additional = it
+			}
+		}
+	}
+	if !searched {
+		return false
+	}
+	var tools []any
+	switch t := m["tools"].(type) {
+	case nil:
+	case []any:
+		tools = t
+	default:
+		return false // not a list: left for the backend to say so
+	}
+	if declaresSearch(tools) {
+		return false
+	}
+	offered = offered || len(tools) > 0
+	reasoning, _ := m["reasoning"].(map[string]any)
+	lite = lite || additional != nil || reasoning["context"] == "all_turns"
+	switch {
+	case additional != nil:
+		have, _ := additional["tools"].([]any)
+		additional["tools"] = append(have, cachedSearch())
+	case lite:
+		m["input"] = append([]any{map[string]any{"type": "additional_tools", "role": "developer",
+			"tools": []any{cachedSearch()}}}, input...)
+	default:
+		m["tools"] = append(tools, cachedSearch())
+	}
+	if !offered {
+		switch c := m["tool_choice"].(type) {
+		case nil:
+			m["tool_choice"] = "none"
+		case string:
+			if c == "" || c == "auto" || c == "none" {
+				m["tool_choice"] = "none"
+			}
+		}
+	}
+	return true
+}
+
+// declaresSearch says whether tools has a web search among them, by any of
+// its names (web_search, web_search_preview, a dated one).
+func declaresSearch(tools []any) bool {
+	for _, raw := range tools {
+		t, _ := raw.(map[string]any)
+		if typ, _ := t["type"].(string); strings.HasPrefix(typ, "web_search") {
+			return true
+		}
+	}
+	return false
 }
 
 func firstLine(s string) string {

@@ -3,7 +3,7 @@ package agent
 // An agent's command-line program is kept up to date from the Agents page
 // (#202): its version, the newest there is, and a click that updates it the
 // way it was installed — with the CLI's own updater where it came from the
-// vendor's installer (claude update, codex update, opencode upgrade), or by
+// vendor's installer (claude update, codex update, opencode upgrade, grok update), or by
 // the package manager that owns it (npm, bun, pnpm, Homebrew). How it was
 // installed is read from where its binary is; when that says nothing sure,
 // the version is shown and nothing offered.
@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/source"
@@ -43,6 +44,9 @@ type CLI struct {
 	Command string `json:"command,omitempty"`
 	// Update: Latest is after Version, and magpie knows how to get it
 	Update bool `json:"update,omitempty"`
+	// App is the version of the agent's desktop app installed beside it
+	// (the Codex app, AppVersion); shown even with no CLI on PATH
+	App string `json:"app,omitempty"`
 }
 
 // cliSpec is where an agent's CLI is published.
@@ -53,6 +57,13 @@ type cliSpec struct {
 	// links lead, with forward slashes) is the one its vendor's installer
 	// put there
 	self func(bin, real string) []string
+	// at is where its vendor's installer puts the CLI under the home folder
+	// (.exe added on Windows), for an agent with no Bin: its command's name
+	// is other tools' too, so PATH can't say it is this one
+	at string
+	// latest is the newest version its own updater would install, for one
+	// not published on npm
+	latest func() string
 }
 
 var cliSpecs = map[string]cliSpec{
@@ -67,7 +78,9 @@ var cliSpecs = map[string]cliSpec{
 		}},
 	"codex": {npm: []string{"@openai/codex"}, brew: []string{"codex"},
 		self: func(bin, real string) []string {
-			// its standalone installer's ~/.codex/packages/standalone/releases/…
+			// its standalone installer's ~/.codex/packages/standalone/releases/…,
+			// reached on Windows through install.ps1's junctions
+			// (%LOCALAPPDATA%\Programs\OpenAI\Codex\bin → …\current\bin)
 			if strings.Contains(real, "/.codex/packages/standalone/") {
 				return []string{bin, "update"}
 			}
@@ -78,6 +91,18 @@ var cliSpecs = map[string]cliSpec{
 		self: func(bin, real string) []string {
 			if strings.Contains(real, "/.opencode/bin/") {
 				return []string{bin, "upgrade"}
+			}
+			return nil
+		}},
+	// Grok Build: x.ai/cli/install.sh links ~/.grok/bin/grok to
+	// ../downloads/grok-<platform>, and grok update to a new
+	// ../downloads/grok-<version>-<platform>; install.ps1 copies grok.exe
+	// into ~\.grok\bin itself, as grok update does again. grok is also
+	// Homebrew's regular-expression tool, hence at.
+	"grok": {at: ".grok/bin/grok", latest: grokLatest,
+		self: func(bin, real string) []string {
+			if l := strings.ToLower(real); strings.Contains(l, "/.grok/bin/") || strings.Contains(l, "/.grok/downloads/") {
+				return []string{bin, "update"}
 			}
 			return nil
 		}},
@@ -108,6 +133,8 @@ type updater struct {
 	brew string   // the brew that has it
 	cmd  []string // the update
 	path string   // a folder to put first on PATH for it (its npm's node)
+	// latest is the newest its own updater would install (cliSpec.latest)
+	latest func() string
 }
 
 // shown is the update as a person would type it.
@@ -126,7 +153,7 @@ var brewPath = regexp.MustCompile(`/(Cellar|Caskroom)/([^/]+)/`)
 // howInstalled says how the CLI at bin was installed, from where it is;
 // nil when that says nothing sure.
 func howInstalled(spec cliSpec, bin string) *updater {
-	real, err := filepath.EvalSymlinks(bin)
+	real, err := proc.RealPath(bin)
 	if err != nil {
 		real = bin
 	}
@@ -137,7 +164,7 @@ func howInstalled(spec cliSpec, bin string) *updater {
 			if len(spec.npm) > 0 {
 				pkg = spec.npm[0]
 			}
-			return &updater{via: "self", pkg: pkg, cmd: c}
+			return &updater{via: "self", pkg: pkg, cmd: c, latest: spec.latest}
 		}
 	}
 	// a package manager's before Homebrew's: npm under Homebrew's node
@@ -384,9 +411,11 @@ func (m *memo) forget(key string) {
 var versions, latests memo
 
 // installedVersion is what the CLI at bin says its version is, asked again
-// only once the binary changes.
+// only once the binary changes: the file its links and junctions lead to,
+// its size or its time (an update's release folder is a new path even where
+// the archive gave every version's binary the same time).
 func installedVersion(bin string) string {
-	real, err := filepath.EvalSymlinks(bin)
+	real, err := proc.RealPath(bin)
 	if err != nil {
 		real = bin
 	}
@@ -413,6 +442,9 @@ var runVersion = proc.Version
 func latestVersion(u *updater) string {
 	if u.via == "brew" {
 		return latests.get("brew:"+u.pkg, "", 6*time.Hour, 15*time.Minute, func() (string, error) { return brewLatest(u) })
+	}
+	if u.latest != nil {
+		return u.latest()
 	}
 	if u.pkg == "" {
 		return ""
@@ -444,6 +476,60 @@ func npmLatest(pkg string) (string, error) {
 		return "", errors.New("no version")
 	}
 	return r.Version, nil
+}
+
+// grokReleases is where Grok's installers and grok update read the newest
+// version of a channel (x.ai/cli/stable), in front of
+// storage.googleapis.com/grok-build-public-artifacts/cli; a var so tests can
+// serve one.
+var grokReleases = []string{"https://x.ai/cli/", "https://storage.googleapis.com/grok-build-public-artifacts/cli/"}
+
+// grokLatest is the newest Grok Build of the channel it follows: the
+// installer's GROK_CHANNEL or grok update --alpha, kept under [cli] in its
+// config.toml (stable when none).
+func grokLatest() string {
+	dir := os.Getenv("GROK_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".grok")
+	}
+	channel := "stable"
+	if cli, _ := edit.GetTOMLTable(filepath.Join(dir, "config.toml"), "cli"); cli["channel"] == "alpha" || cli["channel"] == "enterprise" {
+		channel = cli["channel"]
+	}
+	return latests.get("grok:"+channel, "", 6*time.Hour, 15*time.Minute, func() (v string, err error) {
+		for _, base := range grokReleases {
+			if v, err = channelVersion(base + channel); err == nil {
+				return v, nil
+			}
+		}
+		return "", err
+	})
+}
+
+// channelVersion is the version a release channel's pointer file names.
+func channelVersion(url string) (string, error) {
+	c := &http.Client{Timeout: 8 * time.Second}
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", "magpie")
+	resp, err := source.Do(c, req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("%s answered %s", url, resp.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if err != nil {
+		return "", err
+	}
+	// the whole body is the version: 1.0.50
+	v := strings.TrimSpace(string(b))
+	if v == "" || parseVersion(" "+v) != strings.TrimPrefix(v, "v") {
+		return "", fmt.Errorf("%s: no version", url)
+	}
+	return strings.TrimPrefix(v, "v"), nil
 }
 
 // brewLatest is the version Homebrew has for u, as it last updated itself:
@@ -487,7 +573,17 @@ var brewLatest = func(u *updater) (string, error) {
 // it isn't on PATH.
 func (a *Agent) cliBin() (string, cliSpec) {
 	spec, ok := cliSpecs[a.ID]
-	if !ok || a.WSL != "" || a.Bin == "" {
+	if !ok || a.WSL != "" {
+		return "", spec
+	}
+	if a.Bin == "" {
+		home, err := os.UserHomeDir()
+		if spec.at == "" || err != nil {
+			return "", spec
+		}
+		if bin := filepath.Join(home, filepath.FromSlash(exe(spec.at))); isFile(bin) {
+			return bin, spec
+		}
 		return "", spec
 	}
 	bin, err := exec.LookPath(a.Bin)
@@ -501,11 +597,13 @@ func (a *Agent) cliBin() (string, cliSpec) {
 }
 
 // CLI is the agent's CLI: its version, the newest, and whether magpie can
-// update it. ok is false for an agent without a CLI magpie knows.
+// update it, with its desktop app's version. ok is false for an agent with
+// neither a CLI magpie knows nor its app.
 func (a *Agent) CLI() (c CLI, ok bool) {
+	c.App = a.AppVersion()
 	bin, spec := a.cliBin()
 	if bin == "" {
-		return CLI{}, false
+		return c, c.App != ""
 	}
 	c.Version = installedVersion(bin)
 	u := howInstalled(spec, bin)
@@ -573,7 +671,18 @@ var runUpdate = func(ctx context.Context, u *updater) ([]byte, error) {
 	cmd := proc.CommandContext(ctx, u.cmd[0], u.cmd[1:]...)
 	cmd.Stdin = nil
 	cmd.Dir, _ = os.UserHomeDir()
+	cmd.Env = updateEnv(u)
+	return cmd.CombinedOutput()
+}
+
+// updateEnv is the environment an update runs in: the proxy magpie's own
+// requests take (a SOCKS5 one bridged for bun, which can't use it: #1409),
+// and u's PATH first.
+func updateEnv(u *updater) []string {
 	env := netproxy.Env(os.Environ())
+	if u.via == "bun" {
+		env = netproxy.EnvForBun(env)
+	}
 	if u.path != "" {
 		for i, kv := range env {
 			if k, v, _ := strings.Cut(kv, "="); strings.EqualFold(k, "PATH") {
@@ -581,8 +690,7 @@ var runUpdate = func(ctx context.Context, u *updater) ([]byte, error) {
 			}
 		}
 	}
-	cmd.Env = append(env, "NONINTERACTIVE=1", "HOMEBREW_NO_ENV_HINTS=1", "NO_COLOR=1")
-	return cmd.CombinedOutput()
+	return append(env, "NONINTERACTIVE=1", "HOMEBREW_NO_ENV_HINTS=1", "NO_COLOR=1")
 }
 
 // updateTimeout bounds an update: a download, or Homebrew updating itself first.

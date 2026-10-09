@@ -84,9 +84,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.goto(url);
         return page;
       };
+      // a new context's storage is empty: nothing to clear and reload. A
+      // reload at once lands while the page's first reads are on their way,
+      // and WebKit reports each one it cancels as a page error, "Fetch API
+      // cannot load … due to access control checks" (#1350)
       const page = await open("http://magpie.test/?view=usage");
-      await page.evaluate(() => { localStorage.removeItem("magpie.usageOpen"); localStorage.removeItem("magpie.usageAccounts"); localStorage.removeItem("magpie.maskEmails"); });
-      await page.reload();
       await page.waitForSelector(".subscription-account .user", { state: "attached" });
 
       let got = await cards(page);

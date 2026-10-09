@@ -109,6 +109,11 @@ var ErrPassphrase = errors.New("wrong passphrase, or the file was changed")
 // the damaged one from this computer rather than fail on it forever.
 var ErrCorrupt = errors.New("not a magpie backup")
 
+// ErrNotBackup is a file that doesn't begin like a backup at all: an empty
+// one, a page a server answered with, another app's file. It reads as
+// ErrCorrupt does, but is never rebuilt over by a sync on its own.
+var ErrNotBackup = errors.New("not a magpie backup")
+
 // BundleVersion is the bundle's structure: 2 carries the per-part
 // credential markers (ProvidersKeys, SettingsKeys, LibraryKeys) as their
 // own three-state flags; 1 and before had the whole-bundle Keys alone.
@@ -232,6 +237,7 @@ func Secret(name string) bool { return secretHeader.MatchString(name) }
 func withoutKeys(p provider.Provider) provider.Provider {
 	p.Key, p.KeyName, p.Keys, p.KeyProtocol, p.KeyWeight = "", "", nil, "", 0
 	p.BalanceToken = ""
+	p.AccessKeyID, p.SecretAccessKey = "", ""
 	if len(p.Headers) > 0 {
 		h := map[string]string{}
 		for k, v := range p.Headers {
@@ -278,10 +284,10 @@ func Open(data []byte, pass string) (Bundle, error) {
 		if isBackupJSON(data) {
 			return Bundle{}, ErrCorrupt
 		}
-		return Bundle{}, errors.New("not a magpie backup")
+		return Bundle{}, ErrNotBackup
 	}
 	if e.Format != format {
-		return Bundle{}, errors.New("not a magpie backup")
+		return Bundle{}, ErrNotBackup
 	}
 	if e.Version != 1 || e.KDF != "pbkdf2-sha256" {
 		return Bundle{}, errors.New("this backup was made by a newer magpie; update magpie to open it")

@@ -44,6 +44,9 @@ func Restore(ps []Provider) (added, replaced int, err error) {
 			if p.BalanceToken == "" {
 				p.BalanceToken = f.Providers[i].BalanceToken
 			}
+			if p.AccessKeyID == "" && p.SecretAccessKey == "" {
+				p.AccessKeyID, p.SecretAccessKey = f.Providers[i].AccessKeyID, f.Providers[i].SecretAccessKey
+			}
 		}
 		f.Providers[i] = p
 		replaced++
@@ -107,6 +110,9 @@ func Mirror(ps []Provider, gs []Group) error {
 			p.Key, p.KeyName, p.Keys, p.KeyProtocol, p.KeyWeight = h.Key, h.KeyName, h.Keys, h.KeyProtocol, h.KeyWeight
 			if p.BalanceToken == "" {
 				p.BalanceToken = h.BalanceToken
+			}
+			if p.AccessKeyID == "" && p.SecretAccessKey == "" {
+				p.AccessKeyID, p.SecretAccessKey = h.AccessKeyID, h.SecretAccessKey
 			}
 		}
 		out = append(out, p)

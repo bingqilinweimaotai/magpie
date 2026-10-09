@@ -24,12 +24,32 @@ import (
 // Loopback clients may still use any token, including a stale named key.
 
 // listenAddr is where the gateway listens: every interface while it is
-// shared, on its port, else its address.
+// shared, on its port, else its address. A host MAGPIE_ADDR names itself
+// (127.0.0.1 behind Tailscale Serve, one interface's address) is kept
+// while shared too: sharing asks remote callers for a gateway key, and
+// never widens the listener past the address the user chose (#1112).
 func listenAddr() string {
-	if s := settings.Load(); s.LAN {
+	if s := settings.Load(); s.LAN && pinnedHost() == "" {
 		return "0.0.0.0:" + Port()
 	}
 	return Addr()
+}
+
+// pinnedHost is the host MAGPIE_ADDR names, "" when it isn't set or names
+// every interface (0.0.0.0, ::, or no host).
+func pinnedHost() string {
+	a := os.Getenv("MAGPIE_ADDR")
+	if a == "" {
+		return ""
+	}
+	h, _, err := net.SplitHostPort(a)
+	if err != nil || h == "" {
+		return ""
+	}
+	if ip := net.ParseIP(h); ip != nil && ip.IsUnspecified() {
+		return ""
+	}
+	return h
 }
 
 // Port is the gateway's port.
@@ -105,6 +125,10 @@ func PublicHost() string {
 // host's.
 func ContainerAddrs() bool { return publicURL() == "" && inContainer("/") }
 
+// InContainer: this magpie runs in a container (Docker, Podman, a
+// Kubernetes pod), whose image is what gets updated, not its binary.
+func InContainer() bool { return inContainer("/") }
+
 // inContainer: the system under root is a container's — Docker's or
 // Podman's marker file, or a container runtime in PID 1's cgroup.
 func inContainer(root string) bool {
@@ -128,6 +152,14 @@ func inContainer(root string) bool {
 func LANURLs() []string {
 	if u := publicURL(); u != "" {
 		return []string{u}
+	}
+	// a gateway MAGPIE_ADDR keeps on one host is reached there alone; on
+	// loopback, only through a proxy, whose address MAGPIE_PUBLIC_URL says
+	if h := pinnedHost(); h != "" {
+		if ip := net.ParseIP(h); h == "localhost" || ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return []string{"http://" + net.JoinHostPort(h, Port())}
 	}
 	var out []string
 	ifs, _ := net.Interfaces()

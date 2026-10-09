@@ -100,7 +100,7 @@ func dshAt(at place) *Agent {
 		Sync: func() error { return dshSync(dir, gw()) },
 		Notice: func() string {
 			var notes []string
-			if Running(`(^|/)dsh( |$)`) {
+			if Running(`DeepSeek Harness\.app/`, `(^|/)dsh( |$)`) {
 				if len(dshProfiles(dir)) > 0 {
 					notes = append(notes, "New dsh sessions start on this; one already open keeps its model until you pick another in it. A dsh started with -p or in a terminal reads it at start-up.")
 				} else {
@@ -138,6 +138,9 @@ func dshAt(at place) *Agent {
 			dshWrites.Lock()
 			defer dshWrites.Unlock()
 			for _, f := range dshProfiles(dir) {
+				if err := dshKeepPick(f); err != nil {
+					return err
+				}
 				if err := dshSetFile(f, "", true, nil, gw()); err != nil {
 					return err
 				}
@@ -576,7 +579,10 @@ func dshGet(dir string) string {
 
 // dshStart reads the model a profile's sessions start on: the one last picked
 // in dsh, saved in its settings, which go over every profile, else the
-// agent-default-model entry of the home layer or the profile's own.
+// agent-default-model entry of the home layer or the profile's own. dsh 0.2
+// keeps a pick in that entry itself: a settings.yaml left by 0.1.x is
+// imported into the profile it next boots and renamed settings.yaml.imported,
+// which nothing reads (#1392).
 func dshStart(dir string, items []dshItem) string {
 	items = dshOver(dir, items)
 	sel := edit.GetYAMLMap(filepath.Join(dir, "settings.yaml"), "agent-default-model")
@@ -733,7 +739,7 @@ func dshCheck(dir, gw string) string {
 		return off
 	}
 	creds := filepath.Join(dir, ".credentials.yaml")
-	if v, ok := edit.GetYAML(creds, "refs."+dshKeyRef); ok && v != keyAt(gw) {
+	if v, ok := edit.GetYAML(creds, "refs."+dshKeyRef); ok && v != keyAt(gw) && !gatewayTakes(v) {
 		return "DeepSeek Harness's own key store (" + creds + ") holds another " + dshKeyRef + ", which it uses over magpie's; remove it there (dsh's Models page, Magpie's key) to go through magpie"
 	} else if !ok && dshCredsOurs(creds) {
 		// the desktop app doesn't read .env (#969)
@@ -820,6 +826,35 @@ func dshSet(dir, v, gw string) error {
 		return edit.DelYAML(settings, "agent-default-model")
 	}
 	return nil
+}
+
+// dshKeepPick hands a profile's start back to the user where dsh saved their
+// own pick into magpie's agent-default-model entry. Since 0.2 dsh no longer
+// keeps a pick in ~/.dsh/settings.yaml: its /model (and the one-time import
+// that renames settings.yaml to settings.yaml.imported) writes the config of
+// the profile's last agent-default-model entry, which is magpie's, mark and
+// all (#1392). A start there off magpie's route is the user's then, and
+// Disconnect leaves it as it is, as it left a pick in settings.yaml before;
+// what magpie stashed from before it wrote the entry is older than that pick.
+// One still on the old wiring names DeepSeek's row for magpie's models and
+// stays magpie's.
+func dshKeepPick(f string) error {
+	head, items, err := dshRead(f)
+	if err != nil || dshOldWiring(items) {
+		return nil
+	}
+	i := dshFind(items, "agent-default-model")
+	if i < 0 || !items[i].magpie {
+		return nil
+	}
+	if p := dshConfig(items[i])["provider"]; p == "" || p == dshRoute || dshConfig(items[i])["model"] == "" {
+		return nil
+	}
+	lines := append([]string{}, items[i].lines...)
+	lines[0] = strings.TrimRight(strings.Replace(lines[0], dshMark, "", 1), " ")
+	items[i] = dshItem{id: items[i].id, lines: lines}
+	unstash(dshStashKey(f, "agent-default-model"))
+	return dshWrite(f, head, items)
 }
 
 // dshEnv puts the key for the gateway in $DSH_HOME/.env and dsh's own key
@@ -1484,12 +1519,37 @@ func dshWiredOnce() string {
 	if dir == "" {
 		return ""
 	}
+	files := dshProfiles(dir)
+	if len(files) == 0 {
+		// no dsh: the catalog isn't built for nothing every round, ~34 MB
+		// of garbage a minute in a magpie at rest
+		return ""
+	}
 	var trouble []string
 	models := magpieModels("dsh")
-	files := dshProfiles(dir)
-	if len(files) > 0 {
-		files = append(files, dshHomePatch(dir)) // left as it is without magpie's route
+	// a profile dsh has just made — the desktop app's, opened for the first
+	// time while magpie runs — is its empty template: given magpie's route
+	// and start as the catalog sync would, rather than left listing dsh's
+	// own models alone until magpie's next start (star on Discord). One with
+	// entries of its own and no route is the user's, left to Reapply.
+	fill := []string{}
+	fresh := false
+	for _, f := range files {
+		_, items, err := dshRead(f)
+		switch {
+		case err != nil:
+		case len(items) == 0:
+			fill, fresh = append(fill, f), true
+		case dshWired(items):
+			fill = append(fill, f)
+		}
 	}
+	if fresh {
+		if err := dshFillNewProfiles(fill, models, gateway.URL()); err != nil {
+			trouble = append(trouble, "giving dsh's new profile magpie's route: "+dshWriteError(err))
+		}
+	}
+	files = append(files, dshHomePatch(dir)) // left as it is without magpie's route
 	for _, f := range files {
 		written, err := dshRouteAgain(f, models, gateway.URL())
 		if err != nil {

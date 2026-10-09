@@ -135,7 +135,7 @@ func TestAntigravityTurnedAwayRestsNobody(t *testing.T) {
 		t.Fatalf("the turn: %d %s", code, out)
 	}
 	r := lastRoute(s)
-	if len(r.Tries) != 2 || r.Tries[0].Status != 429 || r.Tries[0].Fail != failRefused || r.Tries[0].Rest != nil {
+	if len(r.Tries) != 2 || r.Tries[0].Status != 429 || r.Tries[0].Fail != failPrompt || r.Tries[0].Rest != nil {
 		t.Fatalf("the turned-away try: %+v", r.Tries)
 	}
 	if !strings.Contains(r.Tries[0].Error, antigravityTurnedAwayHint) {
@@ -295,7 +295,7 @@ func TestAntigravityTurnedAwaySaidInsideTheReply(t *testing.T) {
 			if resting != tc.rest {
 				t.Fatalf("rests %v, want %v: %+v", resting, tc.rest, r.Tries)
 			}
-			if want := failRefused; !tc.rest && r.Tries[0].Fail != want {
+			if want := failPrompt; !tc.rest && r.Tries[0].Fail != want {
 				t.Fatalf("the refusal said inside the reply: Fail=%q: %+v", r.Tries[0].Fail, r.Tries)
 			}
 		})
@@ -313,4 +313,161 @@ func rests() map[string]time.Time {
 		}
 	}
 	return out
+}
+
+// antigravityQuota is Antigravity's 429 when the plan's own allowance on the
+// model is used up: it names the quota and when it resets, which the refusal
+// of #666 never does.
+const antigravityQuota = `{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 3h19m30s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","domain":"cloudcode-pa.googleapis.com"}]}}`
+
+// directTurn is a Claude Desktop chat on Antigravity's model itself, not a
+// group: the one account is the last left to ask (#1425).
+func directTurn(system string, stream bool) string {
+	return `{"model":"antigravity/m","max_tokens":100,"stream":` + fmt.Sprint(stream) + `,"system":` + quote(system) + `,"messages":[{"role":"user","content":"hi"}]}`
+}
+
+// #1425: Claude Desktop's chat on Antigravity alone, with quota to spare.
+// Nobody is left to ask, and the agent is told why at a status the
+// Anthropic and OpenAI SDKs don't retry — Antigravity's own 429 had Claude
+// Desktop ask again ten times over, each turned away the same. The Routing
+// page tells it as the agent's prompt turned away, not a quota used up; the
+// account doesn't rest and isn't asked again.
+func TestAntigravityTurnedAwayLastIsNoQuota(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			asked := 0
+			s, askedUsage := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
+				asked++
+				w.WriteHeader(http.StatusTooManyRequests)
+				io.WriteString(w, turnedAway)
+			})
+			code, out := turnOn(t, s, directTurn(claudeCodeSystem, stream))
+			if code != http.StatusBadRequest {
+				t.Fatalf("the agent got %d, which its SDK retries: %s", code, out)
+			}
+			if !strings.Contains(out, "invalid_request_error") || !strings.Contains(out, "Resource has been exhausted") || !strings.Contains(out, antigravityTurnedAwayHint) {
+				t.Fatalf("the agent isn't told Antigravity's words and why: %s", out)
+			}
+			if asked != 1 {
+				t.Fatalf("Antigravity was asked %d times for a request it turns away every time", asked)
+			}
+			r := lastRoute(s)
+			if r.Status != http.StatusBadRequest || len(r.Tries) != 1 {
+				t.Fatalf("the route: %d %+v", r.Status, r.Tries)
+			}
+			if try := r.Tries[0]; try.Status != http.StatusTooManyRequests || try.Fail != failPrompt || try.Rest != nil {
+				t.Fatalf("the try is told as %q (rest %v), not the agent's prompt turned away: %+v", try.Fail, try.Rest, try)
+			}
+			if *askedUsage != 0 {
+				t.Fatalf("the account's usage was asked again %d times for a request it refused", *askedUsage)
+			}
+			if _, ok := restOf("antigravity@u@example.com"); ok {
+				t.Fatalf("antigravity@u@example.com rests for a request it turned away: %v", rests())
+			}
+			rows, _, _ := usage.Ledger(usage.All, usage.Filter{Provider: "antigravity"})
+			if len(rows) != 1 || rows[0].Status != http.StatusBadRequest || rows[0].ErrType != turnedAwayErrType {
+				t.Fatalf("the request list's row: %+v", rows)
+			}
+		})
+	}
+}
+
+// The same refusal said inside the reply (a 200 that opens with the error
+// event), with nobody left: told the same, at a status not retried, and not
+// asked again as a failure that may pass.
+func TestAntigravityTurnedAwayInsideTheReplyLast(t *testing.T) {
+	asked := 0
+	s, _ := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
+		asked++
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(`data: {"error":{"message":"Resource has been exhausted (e.g. check quota)."}}`))
+	})
+	code, out := turnOn(t, s, directTurn(claudeCodeSystem, true))
+	if code != http.StatusBadRequest || !strings.Contains(out, "Antigravity: Resource has been exhausted (e.g. check quota). — "+antigravityTurnedAwayHint) {
+		t.Fatalf("the agent got %d: %s", code, out)
+	}
+	if asked != 1 {
+		t.Fatalf("asked %d times", asked)
+	}
+	if r := lastRoute(s); len(r.Tries) != 1 || r.Tries[0].Fail != failPrompt || r.Tries[0].Rest != nil {
+		t.Fatalf("the try: %+v", r.Tries)
+	}
+}
+
+// When the member after Antigravity's is out of its own allowance, the agent
+// is told what Antigravity turned away and why, at a status it doesn't
+// retry — not the other's quota, which waiting wouldn't fix either.
+func TestAntigravityTurnedAwayThenAQuota(t *testing.T) {
+	s, _ := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, turnedAway)
+	})
+	spent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"weekly usage limit reached"}}`)
+	}))
+	t.Cleanup(spent.Close)
+	if err := provider.Save(provider.Provider{ID: "other", Name: "Other", Key: "k", Models: []string{"m"}, Anthropic: spent.URL}); err != nil {
+		t.Fatal(err)
+	}
+	code, out := turnOn(t, s, claudeTurn(claudeCodeSystem))
+	if code != http.StatusBadRequest || !strings.Contains(out, antigravityTurnedAwayHint) {
+		t.Fatalf("the agent got %d: %s", code, out)
+	}
+	r := lastRoute(s)
+	if len(r.Tries) != 2 || r.Tries[0].Fail != failPrompt || r.Tries[1].Fail != failQuota {
+		t.Fatalf("the tries: %+v", r.Tries)
+	}
+}
+
+// Antigravity's 429 for a plan really used up stays the quota it is on a
+// Claude Code turn too: its words name the quota and when it resets, not
+// the refusal's. It rests the account, goes on to the next member, and with
+// nobody left the agent gets the 429 (Rest-of-#666 review: refusal, account
+// or model, told apart by what was said, not by the system prompt alone).
+func TestAntigravityQuotaOnAClaudeCodeTurnStaysQuota(t *testing.T) {
+	t.Run("in a group", func(t *testing.T) {
+		s, askedUsage := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, antigravityQuota)
+		})
+		if code, out := turnOn(t, s, claudeTurn(claudeCodeSystem)); code != 200 || !strings.Contains(out, "from the other") {
+			t.Fatalf("the turn: %d %s", code, out)
+		}
+		r := lastRoute(s)
+		if len(r.Tries) != 2 || r.Tries[0].Fail != failQuota || r.Tries[0].Rest == nil {
+			t.Fatalf("the used-up try: %+v", r.Tries)
+		}
+		if strings.Contains(r.Tries[0].Error, antigravityTurnedAwayHint) {
+			t.Fatalf("a used-up plan is said not to be a quota: %s", r.Tries[0].Error)
+		}
+		if *askedUsage != 1 {
+			t.Fatalf("the account's usage was asked again %d times, once as for any used-up plan", *askedUsage)
+		}
+	})
+	t.Run("the last left", func(t *testing.T) {
+		s, _ := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, antigravityQuota)
+		})
+		code, out := turnOn(t, s, directTurn(claudeCodeSystem, false))
+		if code != http.StatusTooManyRequests || strings.Contains(out, antigravityTurnedAwayHint) {
+			t.Fatalf("the agent got %d: %s", code, out)
+		}
+		if r := lastRoute(s); len(r.Tries) != 1 || r.Tries[0].Fail != failQuota {
+			t.Fatalf("the try: %+v", r.Tries)
+		}
+	})
+}
+
+// The Routing page says the note apart from Antigravity's words, in its own
+// language, only when it knows the very words the gateway adds.
+func TestAntigravityTurnedAwayHintIsTheRoutingPages(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "gui", "assets", "routing.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), quote(antigravityTurnedAwayHint)) {
+		t.Fatal("routing.js doesn't know the note the gateway adds to Antigravity's refusal")
+	}
 }

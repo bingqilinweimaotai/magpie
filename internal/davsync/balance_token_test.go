@@ -11,7 +11,8 @@ import (
 )
 
 // A computer sending no keys leaves the server's balance token in place,
-// just as it leaves its API keys. Sending keys replaces the token too.
+// just as it leaves its API keys. Sending keys replaces the token too. A
+// Volcengine access key (#1427) goes the same way, ID and Secret together.
 func TestTakeBalanceToken(t *testing.T) {
 	for _, c := range []struct {
 		name                     string
@@ -29,10 +30,12 @@ func TestTakeBalanceToken(t *testing.T) {
 			server := provider.Provider{ID: "relay", Name: "Old", Chat: "https://old.example.com/v1"}
 			if c.serverKeys {
 				server.Key, server.BalanceToken = "sk-server", "balance-server"
+				server.AccessKeyID, server.SecretAccessKey = "AK-server", "SK-server"
 			}
 			incoming := provider.Provider{ID: "relay", Name: "New", Chat: "https://new.example.com/v1", BalanceToken: c.token}
 			if c.incomingKeys {
 				incoming.Key = "sk-new"
+				incoming.AccessKeyID, incoming.SecretAccessKey = "AK-new", "SK-new"
 			}
 			to := backup.Bundle{Keys: c.serverKeys, Providers: []provider.Provider{server}}
 			from := backup.Bundle{Keys: c.incomingKeys, Providers: []provider.Provider{incoming}}
@@ -44,9 +47,12 @@ func TestTakeBalanceToken(t *testing.T) {
 			if got.BalanceToken != c.want || got.Name != incoming.Name || got.Chat != incoming.Chat {
 				t.Fatalf("merged: %+v, want balance token %q and the incoming name and URL", got, c.want)
 			}
-			wantKey := incoming.Key
+			wantKey, wantAK, wantSK := incoming.Key, incoming.AccessKeyID, incoming.SecretAccessKey
 			if c.serverKeys && !c.incomingKeys {
-				wantKey = server.Key
+				wantKey, wantAK, wantSK = server.Key, server.AccessKeyID, server.SecretAccessKey
+			}
+			if got.AccessKeyID != wantAK || got.SecretAccessKey != wantSK {
+				t.Fatalf("access key: %q %q, want %q %q", got.AccessKeyID, got.SecretAccessKey, wantAK, wantSK)
 			}
 			if got.Key != wantKey || to.Keys != (c.serverKeys || c.incomingKeys) || (to.Keys || (to.ProvidersKeys != nil && *to.ProvidersKeys)) != (c.serverKeys || c.incomingKeys) {
 				t.Fatalf("keys after merge: %+v", to)
@@ -87,24 +93,24 @@ func TestSyncBalanceToken(t *testing.T) {
 			}
 			use(a)
 			if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: "https://relay.example.com/v1",
-				Key: "sk-a", BalanceToken: "balance-a"}); err != nil {
+				Key: "sk-a", BalanceToken: "balance-a", AccessKeyID: "AK-a", SecretAccessKey: "SK-a"}); err != nil {
 				t.Fatal(err)
 			}
 			if err := Configure(cfg); err != nil {
 				t.Fatal(err)
 			}
 			now()
-			wantKey, wantToken := "", ""
+			wantKey, wantToken, wantSecret := "", "", ""
 			if serverKeys {
-				wantKey, wantToken = "sk-a", "balance-a"
+				wantKey, wantToken, wantSecret = "sk-a", "balance-a", "SK-a"
 			}
-			if got := remote(); got.Keys != serverKeys || len(got.Providers) != 1 || got.Providers[0].Key != wantKey || got.Providers[0].BalanceToken != wantToken {
+			if got := remote(); got.Keys != serverKeys || len(got.Providers) != 1 || got.Providers[0].Key != wantKey || got.Providers[0].BalanceToken != wantToken || got.Providers[0].SecretAccessKey != wantSecret {
 				t.Fatalf("first upload: %+v", got)
 			}
 
 			use(b)
 			if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay b", Chat: "https://relay.example.com/v1",
-				Key: "sk-b", BalanceToken: "balance-b"}); err != nil {
+				Key: "sk-b", BalanceToken: "balance-b", AccessKeyID: "AK-b", SecretAccessKey: "SK-b"}); err != nil {
 				t.Fatal(err)
 			}
 			keyless := cfg
@@ -113,12 +119,12 @@ func TestSyncBalanceToken(t *testing.T) {
 				t.Fatal(err)
 			}
 			now()
-			localKey, localToken := "sk-b", "balance-b"
+			localKey, localToken, localSecret := "sk-b", "balance-b", "SK-b"
 			if serverKeys {
-				localKey, localToken = "sk-a", "balance-a"
+				localKey, localToken, localSecret = "sk-a", "balance-a", "SK-a"
 			}
 			ps, _ := provider.Stored()
-			if len(ps) != 1 || ps[0].Key != localKey || ps[0].BalanceToken != localToken {
+			if len(ps) != 1 || ps[0].Key != localKey || ps[0].BalanceToken != localToken || ps[0].SecretAccessKey != localSecret {
 				t.Fatalf("b after download: %+v", ps)
 			}
 			p := ps[0]
@@ -127,7 +133,7 @@ func TestSyncBalanceToken(t *testing.T) {
 				t.Fatal(err)
 			}
 			now()
-			if got := remote(); got.Keys != serverKeys || len(got.Providers) != 1 || got.Providers[0].Name != "Renamed" || got.Providers[0].Key != wantKey || got.Providers[0].BalanceToken != wantToken {
+			if got := remote(); got.Keys != serverKeys || len(got.Providers) != 1 || got.Providers[0].Name != "Renamed" || got.Providers[0].Key != wantKey || got.Providers[0].BalanceToken != wantToken || got.Providers[0].SecretAccessKey != wantSecret {
 				t.Fatalf("after b's keyless upload: %+v", got)
 			}
 			if ps, _ := provider.Stored(); len(ps) != 1 || ps[0].BalanceToken != "balance-b-new" {
@@ -135,7 +141,7 @@ func TestSyncBalanceToken(t *testing.T) {
 			}
 			use(a)
 			now()
-			if ps, _ := provider.Stored(); len(ps) != 1 || ps[0].Name != "Renamed" || ps[0].Key != "sk-a" || ps[0].BalanceToken != "balance-a" {
+			if ps, _ := provider.Stored(); len(ps) != 1 || ps[0].Name != "Renamed" || ps[0].Key != "sk-a" || ps[0].BalanceToken != "balance-a" || ps[0].AccessKeyID != "AK-a" || ps[0].SecretAccessKey != "SK-a" {
 				t.Fatalf("a after download: %+v", ps)
 			}
 		})

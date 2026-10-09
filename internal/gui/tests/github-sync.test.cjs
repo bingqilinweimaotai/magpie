@@ -45,7 +45,7 @@ function serve(lang, posts, refusal = "") {
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
-  for (const width of [900, 440]) for (const lang of ["en", "zh", "ja", "de"]) {
+  for (const width of [900, 440]) for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
     test(`${engine} ${lang} ${width}px: GitHub sync settings`, { timeout: 60000 }, async (t) => {
       const tr = (key) => dictionary[lang]?.[key] || key;
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
@@ -100,7 +100,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await box(L.token).getAttribute("placeholder"), tr("saved · type a new one to replace it"));
     });
   }
-  for (const lang of ["en", "zh", "ja", "de"]) {
+  for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
     test(`${engine} ${lang}: an empty repository's branch refusal is actionable`, { timeout: 60000 }, async (t) => {
       const tr = (key) => dictionary[lang]?.[key] || key;
       const refusal = "The GitHub repository is empty: leave Branch empty or use its default branch for the first sync";

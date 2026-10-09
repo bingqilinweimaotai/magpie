@@ -181,8 +181,8 @@ func TestCodexPromptsSameMtime(t *testing.T) {
 	}
 }
 
-// Codex's Fast mode reaches the ChatGPT backend as service_tier "priority";
-// any other tier is dropped as before.
+// Codex's Fast mode reaches the ChatGPT backend as service_tier "priority",
+// its Ultrafast as "ultrafast"; any other tier is dropped as before.
 func TestCodexBodyServiceTier(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -194,6 +194,9 @@ func TestCodexBodyServiceTier(t *testing.T) {
 	}
 	if v, _ := tier(`{"model":"gpt-6-sol","service_tier":"priority","input":"hi"}`); v != "priority" {
 		t.Errorf("priority: %v", v)
+	}
+	if v, _ := tier(`{"model":"gpt-6-sol","service_tier":"ultrafast","input":"hi"}`); v != "ultrafast" {
+		t.Errorf("ultrafast: %v", v)
 	}
 	for _, s := range []string{`"flex"`, `"auto"`, `"default"`, `"fast"`, `null`} {
 		if v, ok := tier(`{"model":"gpt-6-sol","service_tier":` + s + `,"input":"hi"}`); ok {
@@ -224,5 +227,73 @@ func TestCodexStandaloneNotifications(t *testing.T) {
 				t.Fatalf("standalone changed: %s -> %s", b, a)
 			}
 		}
+	}
+}
+
+// A replayed web search goes with the web_search tool declared where the
+// request carries its tools (#1270): in the tools, or for Codex's Responses
+// Lite in an additional_tools item, which the backend wants there; a
+// request that offered no tools still calls none, and one that chose a
+// tool keeps its choice.
+func TestDeclareSearch(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	const search = `{"type":"web_search_call","status":"completed","action":{"type":"search","query":"go release"}}`
+	const user = `{"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}`
+	type sent struct {
+		Input []struct {
+			Type  string           `json:"type"`
+			Tools []map[string]any `json:"tools"`
+		} `json:"input"`
+		Tools      []map[string]any `json:"tools"`
+		ToolChoice any              `json:"tool_choice"`
+	}
+	types := func(ts []map[string]any) string {
+		var out []string
+		for _, t := range ts {
+			out = append(out, t["type"].(string))
+		}
+		return strings.Join(out, ",")
+	}
+	for _, c := range []struct {
+		name, body          string
+		lite                bool
+		tools, extra, first string
+		choice              any
+	}{
+		{"Lite on an account: into its additional_tools", `{"model":"gpt-6.1-sol","parallel_tool_calls":false,"reasoning":{"effort":"low","context":"all_turns"},"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","tools":[]}]},` + search + `,` + user + `]}`, false, "", "namespace,web_search", "additional_tools", "auto"},
+		{"Lite with no tools item: one first", `{"model":"gpt-6.1-sol","parallel_tool_calls":false,"reasoning":{"effort":"low","context":"all_turns"},"input":[` + search + `,{"type":"compaction_trigger"}]}`, false, "", "web_search", "additional_tools", "none"},
+		{"declared already", `{"model":"gpt-5.5","tools":[{"type":"web_search_preview"}],"input":[` + search + `]}`, false, "web_search_preview", "", "web_search_call", "auto"},
+		{"declared in additional_tools", `{"model":"gpt-5.5","input":[{"type":"additional_tools","tools":[{"type":"web_search"}]},` + search + `]}`, false, "", "web_search", "additional_tools", "auto"},
+	} {
+		var got sent
+		if err := json.Unmarshal(codexBody([]byte(c.body)), &got); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var extra []map[string]any
+		for _, it := range got.Input {
+			extra = append(extra, it.Tools...)
+		}
+		if types(got.Tools) != c.tools || types(extra) != c.extra || got.Input[0].Type != c.first || got.ToolChoice != c.choice {
+			t.Errorf("%s: tools %q, additional %q, first %s, tool_choice %v", c.name, types(got.Tools), types(extra), got.Input[0].Type, got.ToolChoice)
+		}
+	}
+
+	// a choice of a tool stays; tools that aren't a list are left alone
+	for in, want := range map[string]string{
+		`{"tools":[],"tool_choice":"required","input":[` + search + `]}`:              `"tool_choice":"required"`,
+		`{"tool_choice":{"type":"function","name":"shell"},"input":[` + search + `]}`: `"tool_choice":{"name":"shell","type":"function"}`,
+		`{"tools":{},"input":[` + search + `]}`:                                       `"tools":{}`,
+		`{"tools":[],"input":[` + user + `]}`:                                         `"tools":[]`,
+	} {
+		if out := string(DeclareSearch([]byte(in), false)); !strings.Contains(out, want) {
+			t.Errorf("%s:\n%s", in, out)
+		}
+	}
+	// Codex's Lite header names a request Lite without anything in it
+	var lite sent
+	json.Unmarshal(DeclareSearch([]byte(`{"input":[`+search+`]}`), true), &lite)
+	if len(lite.Tools) != 0 || lite.Input[0].Type != "additional_tools" || types(lite.Input[0].Tools) != "web_search" || lite.ToolChoice != "none" {
+		t.Errorf("Lite: %+v", lite)
 	}
 }

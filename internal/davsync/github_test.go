@@ -204,6 +204,51 @@ func githubConfig() Config {
 		Passphrase: "fixture-independent-passphrase", Keys: true, Agents: true}
 }
 
+// GitHub uses the same damaged-file diagnostics as WebDAV and S3, but
+// the recovery command and location must name the configured repository.
+func TestGitHubNotBackup(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		replace    bool
+	}{
+		{"empty", "", true},
+		{"another app", `{"format":"another-app"}`, true},
+		{"web page", "<html><title>Sign in</title></html>", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGithubFixture(t)
+			c := githubConfig()
+			f.objects["main|team/magpie/"+file] = []byte(tc.body)
+			newComputer(t).use(t)
+			if err := Configure(c); err != nil {
+				t.Fatal(err)
+			}
+			err := Now(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "GitHub") || !strings.Contains(err.Error(), "alice/private") || strings.Contains(err.Error(), "WebDAV") {
+				t.Fatalf("the recovery advice should name the GitHub repository: %v", err)
+			}
+			v := Status()
+			if v.File == nil || v.File.Replace != tc.replace {
+				t.Fatalf("the file's replacement status: %+v", v.File)
+			}
+			if v.File.Replace && !strings.Contains(err.Error(), "magpie github upload") {
+				t.Fatalf("the recovery advice should name the GitHub upload command: %v", err)
+			}
+			if f.writes != 0 {
+				t.Fatal("a failed sync replaced the repository's file")
+			}
+			if tc.replace {
+				if err := Upload(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := backup.Open(f.objects["main|team/magpie/"+file], c.Passphrase); err != nil {
+					t.Fatalf("the uploaded GitHub backup doesn't open: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestGitHubRemote(t *testing.T) {
 	f := newGithubFixture(t)
 	c := githubConfig()

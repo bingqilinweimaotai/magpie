@@ -166,3 +166,30 @@ func TestCodexWorkspacesSavedAlike(t *testing.T) {
 		t.Fatalf("after removing %s: %v, in use %q", other, users, now)
 	}
 }
+
+// #1424: a session of the Team seat Codex is on is told as that seat's,
+// by the name it is saved under, not the other seat's of the email; and
+// it is listed once, saved or not.
+func TestCodexWorkspaceSessionIdentities(t *testing.T) {
+	home := signIn(t)
+	codexWorkspaceSignIn(t, home, "me@example.com", "ws-one", "r-one")
+	rememberLogins(true)
+	codexWorkspaceSignIn(t, home, "me@example.com", "ws-two", "r-two")
+	rememberLogins(true)
+	_, active := loginUsers(Logins("codex"))
+	if active == "me@example.com · Team" || !strings.HasPrefix(active, "me@example.com · Team · ") {
+		t.Fatalf("the second seat is saved as %q", active)
+	}
+	byWorkspace := map[string][]string{}
+	for _, id := range SessionIdentities(filepath.Join(home, ".codex")) {
+		if id.Agent == "codex" {
+			byWorkspace[id.AccountID] = append(byWorkspace[id.AccountID], id.User)
+		}
+	}
+	if got := byWorkspace["ws-two"]; len(got) != 1 || got[0] != active {
+		t.Fatalf("the seat Codex is on: %v, want [%s]", got, active)
+	}
+	if got := byWorkspace["ws-one"]; len(got) != 1 || got[0] != "me@example.com · Team" {
+		t.Fatalf("the other seat: %v", got)
+	}
+}

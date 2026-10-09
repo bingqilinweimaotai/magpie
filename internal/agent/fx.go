@@ -61,7 +61,7 @@ func fxIn(at place) *Agent {
 		Dir: dir, Path: path,
 		// ~/.fx is where its settings are. No command: `fx` is a common name
 		// (the JSON viewer has it too), as in WSL (wsl.go).
-		detect: func() bool { return isDir(dir) },
+		detect: func() bool { return agentDir(dir) },
 		Sync: func() error {
 			return syncJSON(path, "providers."+magpieID, func() any { return fxProvider(fxModels(path)[magpieID]) })
 		},

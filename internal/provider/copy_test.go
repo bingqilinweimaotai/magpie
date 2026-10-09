@@ -7,7 +7,7 @@ import (
 )
 
 // A copy of a provider (#268) is added beside it with its keys, balance
-// token and routing, the same key on the same host being what was asked
+// token, Volcengine access key (#1427) and routing, the same key on the same host being what was asked
 // for; a key pasted in the form is the copy's own, and a signed-in
 // account has no copy.
 func TestAddCopy(t *testing.T) {
@@ -18,7 +18,7 @@ func TestAddCopy(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	src := Provider{ID: "relay", Name: "Relay", Chat: "https://api.relay.example/v1", Key: "sk-1", KeyName: "main",
-		Keys: []KeyAccount{{Name: "spare", Key: "sk-2"}}, Routing: "rotate", BalanceToken: "tok",
+		Keys: []KeyAccount{{Name: "spare", Key: "sk-2"}}, Routing: "rotate", BalanceToken: "tok", AccessKeyID: "AK-1", SecretAccessKey: "SK-1",
 		Headers: map[string]string{"X-Org": "acme"}, Fallback: []string{"other/m"},
 		BalanceURL: "https://api.relay.example/q?key={key}", BalancePath: "balance"}
 	if err := Save(src); err != nil {
@@ -43,7 +43,7 @@ func TestAddCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if id != "relay-copy" || c.Name != "Relay copy" || c.Key != "sk-1" || c.KeyName != "main" || len(c.Keys) != 1 || c.Keys[0].Key != "sk-2" ||
-		c.Routing != "rotate" || c.BalanceToken != "tok" || !slices.Equal(c.Fallback, src.Fallback) || c.BalanceURL != src.BalanceURL {
+		c.Routing != "rotate" || c.BalanceToken != "tok" || c.AccessKeyID != "AK-1" || c.SecretAccessKey != "SK-1" || !slices.Equal(c.Fallback, src.Fallback) || c.BalanceURL != src.BalanceURL {
 		t.Fatalf("copy: %+v", c)
 	}
 	// again, under the next free id and name, with a key of its own

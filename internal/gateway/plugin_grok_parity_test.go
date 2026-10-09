@@ -177,3 +177,40 @@ func TestGrokPluginSearchesItself(t *testing.T) {
 		t.Fatalf("%s searches by itself: %v on Responses, %v on Chat", pid, searchesItself(*p, provider.Responses), searchesItself(*p, provider.Chat))
 	}
 }
+
+// A Codex subagent's plain agent_message reaches the Grok plugin as the
+// user's message, as with the built-in (TestGrokGetsAgentMessageAsUser):
+// streamed, as Codex asks, the request is relayed, not translated.
+func TestGrokPluginGetsAgentMessageAsUser(t *testing.T) {
+	var mu sync.Mutex
+	var sent []map[string]any
+	pid := besideFake(t, "grok", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var q map[string]any
+		json.Unmarshal(b, &q)
+		mu.Lock()
+		sent = append(sent, q)
+		mu.Unlock()
+		done := `{"id":"r1","object":"response","status":"completed","output":[{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":1}}`
+		if q["stream"] != true {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, done)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(
+			`event: response.created`+"\n"+`data: {"type":"response.created","response":{"id":"r1","object":"response","status":"in_progress","output":[]}}`,
+			`event: response.completed`+"\n"+`data: {"type":"response.completed","response":`+done+`}`))
+	}))
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"`+pid+`/fake-resp","stream":true,`+agentMessageTurn+`}`)))
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 {
+		t.Fatalf("asked %d times", len(sent))
+	}
+	checkAgentMessageSent(t, sent[0])
+}

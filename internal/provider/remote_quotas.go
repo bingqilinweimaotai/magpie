@@ -21,7 +21,8 @@ import (
 // remote's ("office/codex"), so they never meet this computer's own.
 //
 // Only the magpie holding the sign-ins asks the vendors. It answers
-// RemoteCardsPath from what it has kept (CachedCards) and asks nobody;
+// RemoteCardsPath from what it has kept (CachedCards: its page's cards and
+// what was read behind the requests since, cards_kept.go) and asks nobody;
 // a card's refresh here asks it to read that card again
 // (RemoteRefreshPath), which is the one time a vendor is asked for us.
 
@@ -45,19 +46,33 @@ const errRemoteNothingRead = "nothing read on that magpie yet; refresh to have i
 // errRemoteNoShare is a remote magpie too old to answer RemoteCardsPath.
 const errRemoteNoShare = "remote magpie doesn't share its quotas; update magpie on that computer"
 
+// errRemoteNotShared is a remote magpie that answers models but not its
+// quotas (403): it isn't shared on its local network, as a gateway that
+// MAGPIE_ADDR opens (Docker's) isn't until it is (Fim980 on X: the card
+// said only "Allowance unavailable").
+const errRemoteNotShared = "remote magpie isn't shared; turn on Share on local network on that computer"
+
+// errRemoteKey is a remote magpie that didn't take this provider's key (401).
+const errRemoteKey = "remote magpie didn't take this key; use one of its enabled gateway keys"
+
+// errRemoteUnreachable starts the error of a remote magpie that couldn't
+// be reached at all.
+const errRemoteUnreachable = "couldn't reach the remote magpie"
+
 // CachedCards is the Usage page's cards as this magpie last read them,
 // each with its kind, for another magpie to show: no vendor is asked,
 // whatever their age, and another magpie's cards shown here aren't
 // passed on.
+//
+// The cards are the page's with what was read of the same accounts and
+// keys behind it since (cards_kept.go): a magpie serving only other
+// magpies has nobody on its page (#1313).
 func CachedCards(now time.Time) []SubscriptionQuota {
 	c := &subscriptionUsageCache
 	c.Lock()
 	data := c.data
 	c.Unlock()
-	subs := []SubscriptionQuota{}
-	if data != nil {
-		subs = withDailyCredits(visibleQuotas(data), now)
-	}
+	subs := withDailyCredits(visibleQuotas(withAccountReadings(data)), now)
 	p := &planQuotaCache
 	p.Lock()
 	plans := slices.Clone(p.data)
@@ -66,6 +81,17 @@ func CachedCards(now time.Time) []SubscriptionQuota {
 	b.Lock()
 	balances := slices.Clone(b.data)
 	b.Unlock()
+	ps := keyCardProviders()
+	if plans == nil || balances == nil {
+		keptPlans, keptBalances := keptKeyCards(ps)
+		if plans == nil {
+			plans = keptPlans
+		}
+		if balances == nil {
+			balances = keptBalances
+		}
+	}
+	plans, balances = withKeyReadings(plans, ps, "plan"), withKeyReadings(balances, ps, "balance")
 	out := []SubscriptionQuota{}
 	for _, g := range []struct {
 		kind string
@@ -107,6 +133,15 @@ func ForgetRemoteCardsForTest() {
 	c := &remoteCardCache
 	c.Lock()
 	c.m = nil
+	c.Unlock()
+}
+
+// ForgetKeptCardsForTest has the cards kept on disk (quotas.json) read
+// again from the home a test has set: they are read once per process.
+func ForgetKeptCardsForTest() {
+	c := &lastQuotas
+	c.Lock()
+	c.m, c.loaded = nil, false
 	c.Unlock()
 }
 
@@ -281,13 +316,17 @@ func remoteJSON(ctx context.Context, p Provider, method, path string, dst any) e
 	req.Header.Set("Accept", "application/json")
 	res, err := p.Do(http.DefaultClient, req)
 	if err != nil {
-		return fmt.Errorf("couldn't reach %s: %w", remoteName(p), err)
+		return fmt.Errorf("%s %s: %w", errRemoteUnreachable, remoteName(p), err)
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	switch {
 	case res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusMethodNotAllowed:
 		return fmt.Errorf("%s", errRemoteNoShare)
+	case res.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("%s", errRemoteNotShared)
+	case res.StatusCode == http.StatusUnauthorized:
+		return fmt.Errorf("%s", errRemoteKey)
 	case res.StatusCode < 200 || res.StatusCode >= 300:
 		var e struct {
 			Error struct {

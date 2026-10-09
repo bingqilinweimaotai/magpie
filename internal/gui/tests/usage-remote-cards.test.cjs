@@ -27,6 +27,13 @@ function fixtures(now) {
       error: "nothing read on that magpie yet; refresh to have it read" },
     { provider: "attic", name: "Attic", icon: "magpie", from: "Attic", kind: "subscription", windows: [],
       error: "remote magpie doesn't share its quotas; update magpie on that computer" },
+    // Fim980 on X: these said only "Allowance unavailable"
+    { provider: "kestrel", name: "Kestrel", icon: "magpie", from: "Kestrel", kind: "subscription", windows: [],
+      error: "remote magpie isn't shared; turn on Share on local network on that computer" },
+    { provider: "osprey", name: "Osprey", icon: "magpie", from: "Osprey", kind: "subscription", windows: [],
+      error: "remote magpie didn't take this key; use one of its enabled gateway keys" },
+    { provider: "heron", name: "Heron", icon: "magpie", from: "Heron", kind: "subscription", windows: [],
+      error: "couldn't reach the remote magpie Heron: dial tcp 10.0.0.9:3425: connect: connection refused" },
   ];
 }
 
@@ -62,10 +69,10 @@ function serve(lang, state) {
 }
 
 const words = {
-  en: { none: "Nothing read on that computer yet — refresh this card to have it read", old: "That computer's magpie doesn't share its quotas yet — update magpie there" },
-  zh: { none: "那台电脑还没有读过额度 — 刷新这张卡片让它读取", old: "那台电脑的 magpie 还不能共享额度 — 请在那台电脑上更新 magpie" },
-  ja: { none: "そのコンピューターではまだ読み取っていません — このカードを更新すると読み取ります", old: "そのコンピューターの magpie はまだ利用枠を共有できません — そちらの magpie を更新してください" },
-  de: { none: "Auf diesem Computer wurde noch nichts gelesen — diese Karte aktualisieren, um es lesen zu lassen", old: "Das magpie dieses Computers teilt seine Kontingente noch nicht — aktualisiere magpie dort" },
+  en: { none: "Nothing read on that computer yet — refresh this card to have it read", old: "That computer's magpie doesn't share its quotas yet — update magpie there", shed: "That computer's magpie isn't shared — turn on Settings → Share on local network there", den: "That computer's magpie didn't take this key — use one of its gateway keys in this provider", barn: "Couldn't reach that computer's magpie — check that it is running and its address" },
+  zh: { none: "那台电脑还没有读过额度 — 刷新这张卡片让它读取", old: "那台电脑的 magpie 还不能共享额度 — 请在那台电脑上更新 magpie", shed: "那台电脑的 magpie 没有共享 — 请在那台电脑上打开 设置 → 局域网共享", den: "那台电脑的 magpie 不认这个密钥 — 请在这个服务商里填它的一个网关密钥", barn: "连不上那台电脑的 magpie — 请确认它在运行、地址正确" },
+  ja: { none: "そのコンピューターではまだ読み取っていません — このカードを更新すると読み取ります", old: "そのコンピューターの magpie はまだ利用枠を共有できません — そちらの magpie を更新してください", shed: "そのコンピューターの magpie は共有されていません — そちらで 設定 → ローカルネットワークで共有 をオンにしてください", den: "そのコンピューターの magpie はこのキーを受け付けませんでした — このプロバイダーにそちらのゲートウェイキーを入れてください", barn: "そのコンピューターの magpie に接続できません — 起動しているか、アドレスが正しいか確認してください" },
+  de: { none: "Auf diesem Computer wurde noch nichts gelesen — diese Karte aktualisieren, um es lesen zu lassen", old: "Das magpie dieses Computers teilt seine Kontingente noch nicht — aktualisiere magpie dort", shed: "Das magpie dieses Computers ist nicht freigegeben — schalte dort Einstellungen → Im lokalen Netzwerk freigeben ein", den: "Das magpie dieses Computers hat diesen Schlüssel nicht angenommen — trage bei diesem Anbieter einen seiner Zugangsschlüssel ein", barn: "Das magpie dieses Computers ist nicht erreichbar — prüfe, ob es läuft und die Adresse stimmt" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -89,6 +96,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal((await home.locator(".subscription-error").textContent()).trim(), w.none);
       const attic = page.locator(".subscription-card", { hasText: "Attic" });
       assert.equal((await attic.locator(".subscription-error").textContent()).trim(), w.old);
+      for (const [k, name] of [["shed", "Kestrel"], ["den", "Osprey"], ["barn", "Heron"]]) {
+        const card = page.locator(".subscription-card", { hasText: name });
+        assert.equal((await card.locator(".subscription-error").textContent()).trim(), w[k], k);
+      }
 
       // the remote's card reads again over there, by its own id
       await office.hover();

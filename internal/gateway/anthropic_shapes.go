@@ -28,18 +28,26 @@ import (
 // it, and is not sent it again while magpie runs. A provider that takes
 // them (Anthropic's own API, a relay passing them on) is sent them as the
 // agent wrote them.
+//
+// Command Code's Provider API turns away a {role: "system"} message inside
+// messages at all, the empty one that only carries a turn's effort too:
+// "Invalid input at messages.1.role" (#1407). A provider that refuses one is
+// sent its system messages' text at the end of the top-level system, and an
+// empty one left out.
 
 // The refusals, remembered in unfit under the provider's id as betas are.
 const (
 	shapeDisplayNew = "shape:thinking.display=new" // a display other than summarized or omitted
 	shapeDisplay    = "shape:thinking.display"     // display at all
 	shapeTurnEffort = "shape:messages[].output_config"
+	shapeTurnSystem = "shape:messages[].role=system"
 )
 
 var (
 	displayValueRefused = regexp.MustCompile(`thinking\.(?:adaptive|enabled)\.display:? Input should be`)
 	displayRefused      = regexp.MustCompile(`thinking\.(?:adaptive|enabled)\.display:? Extra inputs are not permitted`)
 	turnEffortRefused   = regexp.MustCompile(`messages\.\d+\.output_config:? Extra inputs are not permitted`)
+	turnRoleRefused     = regexp.MustCompile(`messages\.(\d+)\.role\b`)
 )
 
 // knownDisplay is a thinking.display every Anthropic endpoint has taken.
@@ -65,12 +73,24 @@ func (s *Server) refuseShapes(p provider.Provider, errBody, body []byte) bool {
 	if turnEffortRefused.Match(errBody) && hasTurnEffort(body) {
 		mark(shapeTurnEffort)
 	}
+	// a role refused at a message that is a system one, counted in the
+	// messages as they were sent; a refusal naming a user or assistant
+	// message is over something else
+	if m := turnRoleRefused.FindSubmatch(errBody); m != nil {
+		sent := s.withoutRefusedShapes(p, body)
+		if gjson.GetBytes(sent, "messages."+string(m[1])+".role").String() == "system" {
+			mark(shapeTurnSystem)
+		}
+	}
 	return fresh
 }
 
 // withoutRefusedShapes is body as the provider takes it, leaving out what
 // it has refused before.
 func (s *Server) withoutRefusedShapes(p provider.Provider, body []byte) []byte {
+	if !s.fits(p.ID, shapeTurnSystem, provider.Anthropic) {
+		body = withSystemOnTop(body)
+	}
 	if !bytes.Contains(body, []byte(`"display"`)) && !bytes.Contains(body, []byte(`"output_config"`)) {
 		return body
 	}
@@ -160,6 +180,63 @@ func withoutTurnEffort(body []byte) []byte {
 		out = append(out, b)
 	}
 	return withFields(body, map[string]any{"messages": out})
+}
+
+// withSystemOnTop is body with no system message inside messages: the text
+// of each goes, in order, at the end of the top-level system, and one with
+// none (a turn's effort alone) is left out. The other messages stay as they
+// were sent.
+func withSystemOnTop(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"system"`)) {
+		return body
+	}
+	var v struct {
+		System   json.RawMessage   `json:"system"`
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if json.Unmarshal(body, &v) != nil {
+		return body
+	}
+	var moved []any // text blocks for the top-level system
+	out := make([]json.RawMessage, 0, len(v.Messages))
+	for _, raw := range v.Messages {
+		if gjson.GetBytes(raw, "role").String() != "system" {
+			out = append(out, raw)
+			continue
+		}
+		c := gjson.GetBytes(raw, "content")
+		switch {
+		case c.Type == gjson.String && c.String() != "":
+			moved = append(moved, map[string]any{"type": "text", "text": c.String()})
+		case c.IsArray():
+			for _, b := range c.Array() {
+				if b.Get("type").String() == "text" && b.Get("text").String() != "" {
+					moved = append(moved, json.RawMessage(b.Raw))
+				}
+			}
+		}
+	}
+	if len(out) == len(v.Messages) {
+		return body
+	}
+	fields := map[string]any{"messages": out}
+	if len(moved) > 0 {
+		var top []any
+		var s string
+		var blocks []json.RawMessage
+		switch {
+		case json.Unmarshal(v.System, &s) == nil:
+			if s != "" {
+				top = append(top, map[string]any{"type": "text", "text": s})
+			}
+		case json.Unmarshal(v.System, &blocks) == nil:
+			for _, b := range blocks {
+				top = append(top, b)
+			}
+		}
+		fields["system"] = append(top, moved...)
+	}
+	return withFields(body, fields)
 }
 
 // emptyContent is a message's content with nothing in it: missing, "", or

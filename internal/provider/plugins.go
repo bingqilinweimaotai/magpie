@@ -53,7 +53,7 @@ func customIDs() map[string]bool {
 	return heldOf("customIDs", func() map[string]bool {
 		ids := map[string]bool{}
 		for _, p := range load().Providers {
-			if p.Chat != "" || p.Responses != "" || p.Anthropic != "" || p.Decide != "" {
+			if hasEndpoint(p) {
 				ids[p.ID] = true
 			}
 		}
@@ -175,6 +175,12 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 		}
 		if c.Context == 0 {
 			c.Context = m.Context
+		} else if m.Context > 0 && m.Context < c.Context {
+			// the prompt cap a plugin names wins, but never above the
+			// window it also names: a row with input over context
+			// (opencode/hy3-free's 192K over 190K) was served past its
+			// window (#1286)
+			c.Context = m.Context
 		}
 		// Cursor's own ids no catalog knows: one not named a 1M model
 		// holds what the catalog knows its base to, as the built-in's did
@@ -277,7 +283,9 @@ func pluginProvider(pp plugin.Provider, l pluginLogin) Provider {
 	a := &Account{Agent: "plugin", User: user, Plan: l.Plan, Stream: true, plugin: &pp, pluginKey: acct.Key}
 	if pp.ID == "grok" {
 		// Codex's namespaced tools go to Grok flat, as the built-in sends
-		// them (#404): the plugin's own rewrite would leave them out
+		// them (#404): the plugin's own rewrite would leave them out; and
+		// a plain agent_message goes as the user's message, as the plugin
+		// itself sends it from 0.1.11
 		a.body = grokBody
 	}
 	if pp.ID == "zed" {

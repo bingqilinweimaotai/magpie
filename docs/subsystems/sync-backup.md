@@ -43,6 +43,12 @@ on both sides keeps the newer version while retaining the replaced copy.
 A conditional write refused because another computer committed in between
 is retried through this same merge.
 
+When a remote file is empty, damaged or another app's format, sync stops and
+describes it through `ServerFile`. Settings and the backend's `upload` command
+can replace it with this computer's setup, keeping the old file first.
+HTML and XML are not offered for replacement. GitHub diagnostics name the
+repository and `magpie github upload`, rather than WebDAV's recovery path.
+
 Switching services keeps all inactive kinds in `Config.Servers`. `Other`
 remains the most recently left server for compatibility with older saved
 configurations and clients. Only the active server is used. Empty credential
@@ -88,7 +94,8 @@ node --test internal/gui/tests/github-sync.test.cjs internal/gui/tests/s3-sync.t
 `TestGitHubEmptyRepository` covers the first encrypted backup initializing an
 empty repository and an unchanged second sync. `TestGitHubEmptyRepositoryFailures`
 covers missing branches, unrelated ref conflicts and another computer winning
-the initial write.
+the initial write. `TestGitHubNotBackup` covers backend-specific recovery
+advice when the repository holds an empty or foreign file.
 
 Go tests use `testenv` homes and HTTP fixtures. Browser tests use isolated
 API fixtures in Chromium and WebKit. A live GitHub write requires a test

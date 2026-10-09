@@ -82,7 +82,7 @@ const wbGPTImageModels = `[{"id":"gpt-5.5","name":"GPT-5.5"},
 // wbSignedIn signs WorkBuddy's desktop app in to the build authID names
 // ("workbuddy-desktop", "workbuddy-desktop-ai"), its API at the studio, and
 // gives magpie's provider for it.
-func wbSignedIn(t *testing.T, id, authID string, st *wbStudio) provider.Provider {
+func wbSignedIn(t *testing.T, id, authID string, st http.Handler) provider.Provider {
 	t.Helper()
 	fresh(t)
 	wbImages.Lock()

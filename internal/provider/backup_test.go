@@ -8,6 +8,8 @@ import (
 
 // Restoring and syncing a keyless provider keep this machine's balance
 // token. A token supplied explicitly, or keys supplied with none, replaces it.
+// A Volcengine access key (#1427) is kept the same way, the ID and Secret
+// together.
 func TestBackupBalanceToken(t *testing.T) {
 	for _, op := range []struct {
 		name string
@@ -39,7 +41,8 @@ func TestBackupBalanceToken(t *testing.T) {
 					t.Setenv("PATH", h)
 					here := Provider{ID: "relay", Name: "Relay old", Chat: "https://old.example.com/v1",
 						Key: "sk-here", KeyName: "main", KeyProtocol: Chat,
-						Keys: []KeyAccount{{Name: "spare", Key: "sk-spare", Protocol: Anthropic}}, BalanceToken: "balance-here"}
+						Keys: []KeyAccount{{Name: "spare", Key: "sk-spare", Protocol: Anthropic}}, BalanceToken: "balance-here",
+						AccessKeyID: "AK-here", SecretAccessKey: "SK-here"}
 					if err := Save(here); err != nil {
 						t.Fatal(err)
 					}
@@ -59,6 +62,9 @@ func TestBackupBalanceToken(t *testing.T) {
 					wantKeys := p
 					if p.Key == "" && len(p.Keys) == 0 {
 						wantKeys = here
+					}
+					if got.AccessKeyID != wantKeys.AccessKeyID || got.SecretAccessKey != wantKeys.SecretAccessKey {
+						t.Fatalf("access key: %q %q, want %q %q", got.AccessKeyID, got.SecretAccessKey, wantKeys.AccessKeyID, wantKeys.SecretAccessKey)
 					}
 					if got.Key != wantKeys.Key || got.KeyName != wantKeys.KeyName || got.KeyProtocol != wantKeys.KeyProtocol || !slices.Equal(got.Keys, wantKeys.Keys) {
 						t.Fatalf("keys: %+v, want %+v", got, wantKeys)

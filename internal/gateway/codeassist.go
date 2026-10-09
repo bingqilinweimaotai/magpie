@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -61,7 +62,31 @@ func antigravityRefuses(said string) bool {
 	return strings.Contains(strings.ToLower(said), "resource has been exhausted")
 }
 
-const antigravityTurnedAwayHint = "not a quota: Antigravity turns away Claude Code's and the Claude Agent SDK's system prompt (Claude Code, Claude Desktop's chats) with this 429; use another provider for them"
+// antigravityTurnedAway says whether what p answered a request with system
+// as its system instruction is that refusal (#666): an Antigravity account,
+// the system prompt it turns away, and its "Resource has been exhausted"
+// words. A 429 that says something else — the plan's own allowance used up
+// ("You have exhausted your capacity on this model. Your quota will reset
+// after …") — is the quota it says, whatever the system prompt (#1425).
+func antigravityTurnedAway(p provider.Provider, system, said string) bool {
+	return accountAgent(p) == "antigravity" && antigravityTurnsAway(system) && antigravityRefuses(said)
+}
+
+// antigravityTurnedAwayHint is what magpie adds to Antigravity's words, after
+// " — ", for the agent and the Routing page, which says it apart from them in
+// its own language (routing.js AG_TURNED_AWAY).
+const antigravityTurnedAwayHint = "Antigravity answers this 429 to the system prompt of Claude Code and the Claude Agent SDK (Claude Desktop's chats) whatever quota is left, so it is not a quota and waiting won't help; use another provider for these chats, or put one after Antigravity in a routing group"
+
+// turnedAwayStatus is what the agent is told when nobody is left to answer
+// what Antigravity turned away: a request it shouldn't send again as it is.
+// Antigravity's own 429 had the Anthropic and OpenAI SDKs — Claude Desktop,
+// Claude Code — retry it ten times over, each one turned away the same
+// (#1425); they retry 408, 409, 429 and 5xx, and not a 400.
+const turnedAwayStatus = http.StatusBadRequest
+
+// turnedAwayErrType is the usage log's ErrType for that refusal, in place of
+// the 429 Antigravity's body calls it.
+const turnedAwayErrType = "prompt_turned_away"
 
 // codeAssistID is the id a request on the account's app goes out under: on
 // Antigravity the variant the effort picks for a model that is a family of
@@ -222,6 +247,13 @@ func buildCodeAssistSent(r *Request, sent, agent string) []byte {
 		}
 		contents = append(contents, map[string]any{"role": role, "parts": parts})
 	}
+	if len(contents) > 0 && contents[0]["role"] == "model" {
+		// Gemini turns away a history that opens with the model's turn
+		// (what an agent's compaction can leave): "function call turn comes
+		// immediately after a user turn". Gemini CLI's hardenHistory puts
+		// this user turn before it, and so does this.
+		contents = append([]map[string]any{{"role": "user", "parts": []map[string]any{{"text": "[Continuing from previous AI thoughts...]"}}}}, contents...)
+	}
 	req := map[string]any{"contents": contents}
 	if r.System != "" {
 		req["systemInstruction"] = map[string]any{"role": "user", "parts": []map[string]any{{"text": r.System}}}
@@ -284,6 +316,13 @@ func buildCodeAssistSent(r *Request, sent, agent string) []byte {
 		// Claude's answer has to have room past its thinking
 		if b, ok := tc["thinkingBudget"].(int); ok && claude && gen["maxOutputTokens"] == nil {
 			gen["maxOutputTokens"] = b + 32000
+		}
+	}
+	if r.Format != nil {
+		// the answer as JSON, of the client's schema when it gave one
+		gen["responseMimeType"] = "application/json"
+		if sc := r.Format.schema(); len(sc) > 0 {
+			gen["responseJsonSchema"] = sc
 		}
 	}
 	if catalog.DrawsID(sent) {

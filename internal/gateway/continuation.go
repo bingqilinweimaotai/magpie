@@ -322,11 +322,15 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 			res.Body.Close()
 			failed, failedStatus = p.Explain(p.Name+": "+provider.APIError(b, res.Status), res.StatusCode, b), res.StatusCode
-			if res.StatusCode == http.StatusTooManyRequests && accountAgent(p) == "antigravity" && antigravityTurnsAway(request.System) {
+			if wrongEndpoint(res.StatusCode, b) {
+				failed += wrongAPINote(p, model, res, b)
+			}
+			turnedAway := res.StatusCode == http.StatusTooManyRequests && antigravityTurnedAway(p, request.System, string(b))
+			if turnedAway {
 				failed += " — " + antigravityTurnedAwayHint
 			}
 			if !cont.resume {
-				if res.StatusCode == http.StatusTooManyRequests && accountAgent(p) == "antigravity" && antigravityTurnsAway(request.System) {
+				if turnedAway {
 					markAntigravityTurnsAway(w)
 				}
 				if p.Preset == "openrouter" && openRouterSharedPool(b) {
@@ -334,6 +338,9 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				}
 				keepRetry(w.Header(), res.Header, b)
 				u.ErrType = provider.ErrorType(b)
+				if turnedAway {
+					u.ErrType = turnedAwayErrType
+				}
 				return writeError(w, from, res.StatusCode, failed), failed
 			}
 		}
@@ -446,9 +453,12 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			failed = p.Name + ": " + errEndedShort.Error()
 		}
 	}
-	if failed != "" {
+	if failed != "" && markAntigravityRefused(w, p, request.System, failed) {
 		// the same refusal as the 429's, said inside the reply
-		markAntigravityRefused(w, p, request.System, failed)
+		if !strings.HasSuffix(failed, antigravityTurnedAwayHint) {
+			failed += " — " + antigravityTurnedAwayHint
+		}
+		u.ErrType = turnedAwayErrType
 	}
 	if !errSent {
 		enc.event(Event{Kind: KError, Text: failed, Code: failedCode})

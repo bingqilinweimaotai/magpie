@@ -176,6 +176,17 @@ func TestRemoteMagpieUnreachable(t *testing.T) {
 	if cs := RemoteCards(ctx); len(cs) != 1 || cs[0].Error != errRemoteNoShare {
 		t.Errorf("an old magpie: %+v", cs)
 	}
+	// one that serves models but keeps its quotas, or refuses the key,
+	// says which, so its card can say what to do there
+	for status, want := range map[int]string{http.StatusForbidden: errRemoteNotShared, http.StatusUnauthorized: errRemoteKey} {
+		ForgetRemoteCardsForTest()
+		peer.Lock()
+		peer.status = status
+		peer.Unlock()
+		if cs := RemoteCards(ctx); len(cs) != 1 || cs[0].Error != want {
+			t.Errorf("%d: %+v", status, cs)
+		}
+	}
 }
 
 // The cards told to another magpie are this one's as last read: nothing
